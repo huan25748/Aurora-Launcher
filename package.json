@@ -1,6 +1,6 @@
 {
   "name": "aurora-launcher",
-  "version": "1.0.60",
+  "version": "1.0.69",
   "description": "Aurora Launcher - a modern Minecraft launcher",
   "main": "dist/main/index.js",
   "author": "Aurora",
