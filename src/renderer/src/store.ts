@@ -110,7 +110,7 @@ export const useStore = create<StoreState>((set, get) => ({
   pushLogs: (lines) =>
     set((state) => {
       const merged = [...state.logs, ...lines]
-      return { logs: merged.length > 1200 ? merged.slice(-1200) : merged }
+      return { logs: merged.length > 600 ? merged.slice(-600) : merged }
     }),
   clearLogs: () => set({ logs: [] }),
   toast: (type, message, title) => {

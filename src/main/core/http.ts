@@ -26,7 +26,9 @@ const MIRROR_RULES: { re: RegExp; to: string }[] = [
   { re: /^https:\/\/maven\.neoforged\.net\/releases\//, to: 'https://bmclapi2.bangbang93.com/maven/' },
   { re: /^https:\/\/maven\.neoforged\.net\/api\//, to: 'https://bmclapi2.bangbang93.com/neoforge/meta/api/' },
   { re: /^https:\/\/api\.modrinth\.com\//, to: 'https://mod.mcimirror.top/modrinth/' },
-  { re: /^https:\/\/cdn\.modrinth\.com\//, to: 'https://mod.mcimirror.top/' }
+  { re: /^https:\/\/cdn\.modrinth\.com\//, to: 'https://mod.mcimirror.top/' },
+  { re: /^https:\/\/edge\.forgecdn\.net\//, to: 'https://mod.mcimirror.top/' },
+  { re: /^https:\/\/mediafilez\.forgecdn\.net\//, to: 'https://mod.mcimirror.top/' }
 ]
 
 export function mirrorUrl(url: string): string {
@@ -150,10 +152,7 @@ export function candidates(url: string, source: DownloadSource = sourceOf()): st
   const list: string[] = []
   if (source === 'official') list.push(url)
   else if (source === 'mirror') list.push(mirrored, url)
-  else if (source === 'auto' && /^https:\/\/api\.modrinth\.com\//i.test(url)) {
-    // Modrinth metadata is cached by MCIM; files still use the official CDN.
-    list.push(mirrored, url)
-  } else {
+  else {
     // auto / prefer-official: official first, mirror as the fallback. This
     // matches PCL's default and avoids stalling on an unhealthy BMCLAPI path.
     list.push(url, ...(mirrored !== url ? [mirrored] : []))

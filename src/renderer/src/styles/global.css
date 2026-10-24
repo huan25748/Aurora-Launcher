@@ -3606,3 +3606,85 @@ img {
   right: 10px;
   bottom: 10px;
 }
+
+/* Modrinth downloads and light ambient tint adjustments */
+.app {
+  background:
+    radial-gradient(900px 560px at 86% -10%, color-mix(in srgb, var(--acc2) 10%, transparent), transparent 66%),
+    radial-gradient(720px 520px at -8% 6%, color-mix(in srgb, var(--acc1) 7%, transparent), transparent 64%),
+    var(--bg);
+}
+
+.quick-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.quick-stats .stat {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 9px 14px;
+}
+
+.quick-stats .stat + .stat {
+  border-top: 1px solid var(--line);
+}
+
+.hero-bottom .pill {
+  outline: none;
+}
+
+.hero-bottom .pill:focus-visible,
+button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--acc2) 55%, var(--line));
+  outline-offset: 2px;
+}
+
+button:focus:not(:focus-visible) {
+  outline: none;
+}
+
+[data-theme='light'] .app {
+  background:
+    radial-gradient(900px 560px at 86% -10%, color-mix(in srgb, var(--acc2) 13%, transparent), transparent 66%),
+    radial-gradient(720px 520px at -8% 6%, color-mix(in srgb, var(--acc1) 9%, transparent), transparent 64%),
+    var(--bg);
+}
+
+.hero-bottom {
+  color: var(--muted);
+}
+
+.hero-bottom .link {
+  color: var(--muted);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  outline: none;
+}
+
+.hero-bottom .link:hover {
+  color: var(--text);
+}
+
+.about-cover {
+  width: 96px;
+  height: 96px;
+  border-radius: 20px;
+}
+
+.about-cover .brand-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+}
+
+.about-cover .brand-mark svg {
+  width: 30px;
+  height: 30px;
+}

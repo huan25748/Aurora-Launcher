@@ -5,6 +5,7 @@ import type {
   CurseForgeCategory,
   CurseForgeFile,
   CurseForgeHit,
+  CurseForgeMissingMod,
   CurseForgeProject,
   Instance,
   McVersionSummary
@@ -52,6 +53,7 @@ export function CurseForgeTab({ type }: { type: ContentFilterKind }) {
   const [folderFiles, setFolderFiles] = useState<CurseForgeFile[] | null>(null)
   const [folderVersion, setFolderVersion] = useState('')
   const [folderFileId, setFolderFileId] = useState<number | null>(null)
+  const [missingMods, setMissingMods] = useState<CurseForgeMissingMod[]>([])
   const searchSeq = useRef(0)
 
   const targetInstance: Instance | undefined = instances.find((i) => i.id === targetInstanceId) ?? defaultInstance
@@ -250,7 +252,8 @@ export function CurseForgeTab({ type }: { type: ContentFilterKind }) {
           instanceName: instanceName.trim() || undefined
         })
         await refreshInstances()
-        toast('success', '整合包安装完成，已创建实例')
+        if (result.missing.length) setMissingMods(result.missing)
+        else toast('success', '整合包安装完成，已创建实例')
         return
       }
       if (!targetInstance) {
@@ -533,6 +536,39 @@ export function CurseForgeTab({ type }: { type: ContentFilterKind }) {
         )}
         <div style={{ marginTop: 8, color: 'var(--faint)', fontSize: 11.5 }}>
           只下载当前选择的文件，不自动安装前置依赖。
+        </div>
+      </Modal>
+
+      <Modal
+        open={missingMods.length > 0}
+        onClose={() => setMissingMods([])}
+        title={`有 ${missingMods.length} 个文件未能安装`}
+        subtitle="整合包已安装完成，但以下文件没有成功下载，通常是作者未开放第三方下载或接口暂不可用。"
+        footer={
+          <Button variant="primary" onClick={() => setMissingMods([])}>
+            知道了
+          </Button>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 360, overflow: 'auto' }}>
+          {missingMods.map((item) => (
+            <div
+              key={`${item.projectId}-${item.fileId}`}
+              style={{
+                padding: '9px 12px',
+                border: '1px solid var(--line)',
+                borderRadius: 8,
+                background: 'var(--panel)'
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{item.name}</div>
+              <div style={{ marginTop: 2, color: 'var(--faint)', fontSize: 11 }}>
+                项目 {item.projectId} · 文件 {item.fileId}
+                {item.fileName ? ` · ${item.fileName}` : ''}
+              </div>
+              <div style={{ marginTop: 3, color: 'var(--muted)', fontSize: 11.5 }}>{item.reason}</div>
+            </div>
+          ))}
         </div>
       </Modal>
     </>

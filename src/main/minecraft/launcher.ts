@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { dirs, versionJarPath, assetsIndexPath } from '../core/paths'
 import { ensureDir, existsSync } from '../core/fsx'
 import { consoleLog, emit } from '../core/bus'
-import { getSettings, suggestedMemory } from '../core/settings'
+import { getSettings, suggestedMemory, systemInfo } from '../core/settings'
 import { TaskGroupHandle } from '../core/tasks'
 import { extractNatives } from '../core/zip'
 import { readInstance, updateInstance, addPlayTime, ensureInstanceFolders, touchLaunch } from './instances'
@@ -408,12 +408,31 @@ function applyFirstLaunchLanguage(instance: Instance): void {
   fs.writeFileSync(file, withoutLang.join('\n') + '\n', 'utf8')
 }
 
+async function ensurePackMemory(instance: Instance): Promise<void> {
+  if (instance.memory) return
+  try {
+    const names = await fsp.readdir(path.join(instance.gameDir, 'mods'))
+    const count = names.filter((name) => /\.jar$/i.test(name)).length
+    if (count < 50) return
+    const totalMemory = Number(systemInfo().memoryMB ?? 0)
+    const cap = totalMemory > 0 ? Math.max(4096, Math.floor((totalMemory * 0.7) / 256) * 256) : 8192
+    const wanted = count >= 220 ? 8192 : count >= 90 ? 6144 : 5120
+    const memory = Math.min(wanted, cap)
+    const current = instance.memory ?? getSettings().defaultMemory ?? suggestedMemory()
+    if (memory <= current) return
+    instance.memory = memory
+    await updateInstance(instance.id, { memory })
+    consoleLog('launcher', 'info', `大型整合包自动分配内存 ${memory} MB（${count} 个模组）`)
+  } catch {}
+}
+
 export async function launchGame(instanceId: string, options: LaunchOptions, group: TaskGroupHandle): Promise<LaunchResult> {
   if (isRunning()) return { ok: false, error: '已有游戏正在运行' }
   const instance = readInstance(instanceId)
   if (!instance) return { ok: false, error: '实例不存在' }
   if (!instance.versionId) return { ok: false, error: '该实例尚未关联游戏版本，请先安装版本' }
   ensureInstanceFolders(instanceId)
+  await ensurePackMemory(instance)
   if (getSettings().firstLaunchChinese && instance.playCount === 0 && !instance.languageInitialized) {
     try {
       applyFirstLaunchLanguage(instance)

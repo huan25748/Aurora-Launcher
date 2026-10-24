@@ -15,6 +15,7 @@ const DEFAULTS: Settings = {
   theme: 'system',
   accent: 'aurora',
   downloadSource: 'auto',
+  modrinthSource: 'mirror',
   downloadSources: {},
   maxConcurrency: 24,
   downloadThreads: 128,

@@ -43,7 +43,7 @@ export function AboutPage() {
       name: 'z0z0r4',
       desc: '提供了 MCIM 社区资源镜像源和帮助库图床！',
       action: 'MCIM 主页',
-      url: 'https://mod.mcimirror.top/',
+      url: 'https://www.mcimirror.top/',
       bg: '#334155',
       icon: <img src={z0z0r4Avatar} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     },
@@ -93,7 +93,7 @@ export function AboutPage() {
       <div className="detail-grid" style={{ alignItems: 'stretch' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
           <div className="card card-pad" style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
-            <div className="detail-cover" style={{ ['--c1' as never]: 'var(--acc1)', ['--c2' as never]: 'var(--acc2)', ['--c3' as never]: 'var(--acc3)' }}>
+            <div className="detail-cover about-cover">
               <BrandMark />
             </div>
             <div style={{ flex: 1 }}>

@@ -7,6 +7,7 @@ import type {
   CurseForgeHit,
   CurseForgeInstallOptions,
   CurseForgePackInstallOptions,
+  CurseForgePackInstallResult,
   CurseForgeProject,
   CurseForgeSearchResult,
   ContentKind,
@@ -153,7 +154,7 @@ export interface AuroraApi {
     translations(ids: number[]): Promise<Record<string, string>>
     install(opts: CurseForgeInstallOptions): Promise<{ installed: string[]; skipped: string[] }>
     installToFolder(opts: { modId: number; fileId: number; destDir: string }): Promise<{ installed: string[] }>
-    installPack(opts: CurseForgePackInstallOptions): Promise<{ instanceId: string }>
+    installPack(opts: CurseForgePackInstallOptions): Promise<CurseForgePackInstallResult>
   }
   java: {
     list(): Promise<JavaInfo[]>

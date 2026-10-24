@@ -85,6 +85,8 @@ export interface Settings {
   theme: ThemeMode
   accent: string
   downloadSource: DownloadSource
+  /** Modrinth API / file source: auto uses MCIM metadata + official files, mirror forces MCIM. */
+  modrinthSource: DownloadSource
   /** Per-loader overrides; omitted entries fall back to downloadSource. */
   downloadSources?: DownloadSourceMap
   maxConcurrency: number
@@ -536,6 +538,19 @@ export interface CurseForgeInstallOptions {
   instanceId: string
   modId: number
   fileId: number
+}
+
+export interface CurseForgeMissingMod {
+  projectId: number
+  fileId: number
+  name: string
+  fileName?: string
+  reason: string
+}
+
+export interface CurseForgePackInstallResult {
+  instanceId: string
+  missing: CurseForgeMissingMod[]
 }
 
 export interface CurseForgePackInstallOptions {

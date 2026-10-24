@@ -4,7 +4,7 @@ import path from 'node:path'
 import { dirs } from '../core/paths'
 import { fetchJson, downloadFile, runPool, formatBytes } from '../core/http'
 import { ensureDir, safeFileName } from '../core/fsx'
-import { consoleLog, emit, toast } from '../core/bus'
+import { consoleLog, emit } from '../core/bus'
 import { TaskGroupHandle, TaskStepHandle } from '../core/tasks'
 import { extractZipSafe } from '../core/zip'
 import { getSettings } from '../core/settings'
@@ -13,7 +13,7 @@ import { chineseNameFor } from '../core/modnames'
 import { readInstance, createInstance, instancePath, cleanupInstallVersions } from './instances'
 import { contentDir, gameDirOf, hasInstalledMod } from './content'
 import { installFabricLike, installForgeLike, installVanilla, listLoaderVersions } from './installer'
-import type { LoaderKind } from '../../shared/types'
+import type { DownloadSource, LoaderKind } from '../../shared/types'
 import type {
   ContentFilterKind,
   ContentKind,
@@ -30,6 +30,10 @@ const UA = 'AuroraLauncher/1.0.0 (github.com/aurora-launcher)'
 
 function headers(): Record<string, string> {
   return { 'User-Agent': UA, Accept: 'application/json' }
+}
+
+function modrinthSource(): DownloadSource {
+  return getSettings().modrinthSource ?? 'auto'
 }
 
 export interface SearchParams {
@@ -57,7 +61,7 @@ export async function searchModrinth(params: SearchParams): Promise<ModrinthSear
   q.set('offset', String(params.offset ?? 0))
   q.set('index', params.index ?? 'relevance')
   const url = `${API}/search?${q.toString()}`
-  const res = await fetchJson<ModrinthSearchResult>(url, { headers: headers(), timeout: 20_000 })
+  const res = await fetchJson<ModrinthSearchResult>(url, { headers: headers(), timeout: 20_000, source: modrinthSource() })
   res.hits = res.hits.map((hit) => ({ ...hit, nameTranslation: chineseNameFor('modrinth', hit.slug) }))
   return res
 }
@@ -72,7 +76,8 @@ export async function getProject(id: string): Promise<ModrinthProject> {
   // it returns `id` + `followers`, while search hits use `project_id` + `follows`.
   const raw = await fetchJson<Record<string, unknown>>(`${API}/project/${encodeURIComponent(id)}`, {
     headers: headers(),
-    timeout: 20_000
+    timeout: 20_000,
+    source: modrinthSource()
   })
   const asString = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback)
   const asNumber = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
@@ -106,17 +111,8 @@ export async function getProject(id: string): Promise<ModrinthProject> {
   }
 }
 
-/**
- * Version endpoints can be very large (JEI alone has 3800+ versions). The MCIM
- * cache often truncates or times out on them, so try the official API first and
- * only fall back to the mirror.
- */
 async function fetchVersionJson<T>(url: string): Promise<T> {
-  try {
-    return await fetchJson<T>(url, { headers: headers(), timeout: 20_000, source: 'official' })
-  } catch {
-    return fetchJson<T>(url, { headers: headers(), timeout: 20_000, source: 'mirror' })
-  }
+  return fetchJson<T>(url, { headers: headers(), timeout: 20_000, source: modrinthSource() })
 }
 
 export async function getVersions(projectId: string, mcVersion?: string, loader?: string): Promise<ModrinthVersion[]> {
@@ -212,6 +208,7 @@ export async function installProject(opts: DownloadInstallOptions): Promise<{ in
         dest,
         sha1: file.hashes?.sha1,
         size: file.size,
+        source: modrinthSource(),
         signal: group.signal,
         retries: 2,
         onProgress: (received, total) =>
@@ -251,6 +248,7 @@ export async function installProjectToFolder(opts: { projectId: string; versionI
       dest,
       sha1: file.hashes?.sha1,
       size: file.size,
+      source: modrinthSource(),
       retries: 2,
       signal: group.signal,
       onProgress: (received, total) =>
@@ -307,6 +305,7 @@ async function installDependencies(
           dest,
           sha1: file.hashes?.sha1,
           size: file.size,
+          source: modrinthSource(),
           retries: 2,
           onProgress: (received, total) =>
             step!.progress(received, `${formatBytes(received)} / ${formatBytes(total || totalSize)}`, total || totalSize)
@@ -361,7 +360,7 @@ export async function installModpack(
     const tmpFile = path.join(dirs().cache, 'modpacks', safeFileName(file.filename))
     const step = group.step('下载整合包', 1)
     step.start(1, file.filename)
-    await downloadFile({ url: file.url, dest: tmpFile, sha1: file.hashes?.sha1, size: file.size, signal: group.signal, retries: 2 })
+    await downloadFile({ url: file.url, dest: tmpFile, sha1: file.hashes?.sha1, size: file.size, source: modrinthSource(), signal: group.signal, retries: 2 })
     step.done(formatBytes(file.size))
     const extractDir = path.join(dirs().cache, 'modpacks', `${version.id}-extracted`)
     await fsp.rm(extractDir, { recursive: true, force: true })
@@ -413,7 +412,7 @@ export async function installModpack(
         let lastError: unknown = null
         for (const url of entry.downloads) {
           try {
-            await downloadFile({ url, dest, sha1: entry.hashes.sha1, size: entry.fileSize, signal: group.signal, retries: 1 })
+            await downloadFile({ url, dest, sha1: entry.hashes.sha1, size: entry.fileSize, source: modrinthSource(), signal: group.signal, retries: 1 })
             lastError = null
             break
           } catch (e) {
@@ -514,7 +513,7 @@ export async function installLocalModpack(zipFile: string): Promise<{ instanceId
         let lastError: unknown = null
         for (const url of entry.downloads ?? []) {
           try {
-            await downloadFile({ url, dest, sha1: entry.hashes?.sha1, size: entry.fileSize, signal: group.signal, retries: 1 })
+            await downloadFile({ url, dest, sha1: entry.hashes?.sha1, size: entry.fileSize, source: modrinthSource(), signal: group.signal, retries: 1 })
             lastError = null
             break
           } catch (e) {

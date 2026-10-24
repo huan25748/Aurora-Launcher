@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { nativeImage } from 'electron'
 import { dirs } from '../core/paths'
 import { ensureDir, listFiles, safeFileName, sha1Text, timestampName } from '../core/fsx'
 import { readJsonEntry, readEntryText, readEntryBuffer, zipDirectory } from '../core/zip'
@@ -9,6 +10,22 @@ import { readInstance } from './instances'
 import type { ContentItem, ContentKind, ModMeta, ScreenshotItem, WorldItem } from '../../shared/types'
 
 const metaCache = new Map<string, { key: string; meta: ModMeta }>()
+
+/** Mod icons are displayed at ~20px; keep a 64px data URL to avoid retaining full-size PNGs. */
+function smallIconData(file: string): string | undefined {
+  try {
+    const image = nativeImage.createFromPath(file)
+    if (!image.isEmpty()) return image.resize({ width: 64, quality: 'good' }).toDataURL()
+  } catch {}
+  try {
+    if (fs.statSync(file).size > 192 * 1024) return undefined
+    const ext = path.extname(file).toLowerCase()
+    const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png'
+    return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+  } catch {
+    return undefined
+  }
+}
 
 export function gameDirOf(instanceId: string): string {
   const inst = readInstance(instanceId)
@@ -217,13 +234,7 @@ export async function listContent(instanceId: string, kind: ContentKind): Promis
       try {
         meta = readModMeta(full)
         icon = modIconPath(full, meta)
-      if (icon) {
-        try {
-          const ext = path.extname(icon).toLowerCase()
-          const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png'
-          iconData = `data:${mime};base64,${fs.readFileSync(icon).toString('base64')}`
-        } catch {}
-      }
+      if (icon) iconData = smallIconData(icon)
       } catch {}
     }
     if (kind === 'resourcepacks') {

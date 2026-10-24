@@ -170,15 +170,9 @@ export function HomePage() {
                 {selected.lastPlayedAt ? `上次游玩 ${timeAgo(selected.lastPlayedAt)}` : '这个实例还没有启动过'}
                 {selected.totalPlayTimeMs ? ` · 累计 ${formatDuration(selected.totalPlayTimeMs)}` : ''}
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  className="pill"
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => navigate({ name: 'instance', id: selected.id })}
-                >
-                  管理实例 <ArrowRight size={12} />
-                </button>
-              </div>
+              <button className="link" onClick={() => navigate({ name: 'instance', id: selected.id })}>
+                管理实例 <ArrowRight size={12} />
+              </button>
             </div>
           </div>
         ) : (
@@ -221,7 +215,7 @@ export function HomePage() {
             <ArrowRight size={16} style={{ color: 'var(--faint)' }} />
           </div>
 
-          <div className="quick-stats">
+          <div className="card quick-stats">
             <div className="stat">
               <div className="v">{formatDuration(appInfo?.totalPlayTimeMs ?? 0)}</div>
               <div className="k">{t('home.totalTime')}</div>

@@ -128,6 +128,7 @@ export function ConsoleDock() {
           </button>
         </div>
       </div>
+      {open && (
       <div className="console-body">
         <div className="task-panel">
           {groups.length === 0 && (
@@ -148,6 +149,7 @@ export function ConsoleDock() {
           ))}
         </div>
       </div>
+      )}
     </div>
   )
 }

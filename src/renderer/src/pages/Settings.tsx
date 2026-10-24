@@ -335,6 +335,17 @@ export function SettingsPage() {
                     </Button>
                   </div>
                 </Row>
+                <Row name="Modrinth 下载源" desc="控制 Modrinth 元数据与文件；镜像使用 MCIM（mod.mcimirror.top）">
+                  <Select
+                    value={settings.modrinthSource ?? 'mirror'}
+                    onChange={(e) => void patch({ modrinthSource: e.target.value as Settings['downloadSource'] })}
+                    style={{ minWidth: 220 }}
+                  >
+                    <option value="auto">自动（官方优先，失败回退镜像）</option>
+                    <option value="mirror">镜像（MCIM 元数据与文件）</option>
+                    <option value="official">官方（Modrinth 直连）</option>
+                  </Select>
+                </Row>
                 <div className="sub" style={{ marginTop: 10 }}>分类下载源：留空则跟随默认源</div>
                 {([
                   ['vanilla', '原版游戏'],

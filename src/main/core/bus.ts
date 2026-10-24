@@ -23,11 +23,12 @@ export function emit(channel: string, payload?: Payload): void {
 }
 
 let consoleLines: LogLine[] = []
-const MAX_CONSOLE_LINES = 4000
+const MAX_CONSOLE_LINES = 2000
+const MAX_CONSOLE_TEXT = 4000
 
 export function consoleLog(source: LogLine['source'], level: LogLine['level'], text: string): void {
   // Strip ANSI colour sequences emitted by Minecraft / Forge.
-  const clean = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
+  const clean = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').slice(0, MAX_CONSOLE_TEXT)
   const line: LogLine = { ts: Date.now(), source, level, text: clean }
   consoleLines.push(line)
   if (consoleLines.length > MAX_CONSOLE_LINES) consoleLines.splice(0, consoleLines.length - MAX_CONSOLE_LINES)

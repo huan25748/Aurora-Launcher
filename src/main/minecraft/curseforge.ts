@@ -7,11 +7,12 @@ import { consoleLog } from '../core/bus'
 import { TaskGroupHandle } from '../core/tasks'
 import { ensureDir, existsSync, safeFileName } from '../core/fsx'
 import { readJsonEntry, extractZipSafe } from '../core/zip'
-import { createInstance, getInstance, cleanupInstallVersions } from './instances'
+import { createInstance, getInstance, cleanupInstallVersions, updateInstance } from './instances'
 import { hasInstalledMod } from './content'
 import { chineseNameFor } from '../core/modnames'
 import { translateCurseForgeMany, translateQueryToEnglish } from '../core/translate'
 import { listInstalledVersions } from './version'
+import { systemInfo } from '../core/settings'
 import { installVanilla, installFabricLike, installForgeLike } from './installer'
 import type {
   ContentFilterKind,
@@ -19,7 +20,9 @@ import type {
   CurseForgeFile,
   CurseForgeHit,
   CurseForgeInstallOptions,
+  CurseForgeMissingMod,
   CurseForgePackInstallOptions,
+  CurseForgePackInstallResult,
   CurseForgeProject,
   CurseForgeSearchResult,
   Instance
@@ -183,13 +186,24 @@ async function getCurseForgeFile(modId: number, fileId: number): Promise<CurseFo
   return mapFile(raw.data)
 }
 
+/** CurseForge CDN paths are deterministic: /files/<first 4>/<rest>/<fileName>. */
+function derivedCdnUrl(file: CurseForgeFile): string | null {
+  const id = String(file.id)
+  if (id.length < 6 || !file.fileName) return null
+  return `https://edge.forgecdn.net/files/${id.slice(0, 4)}/${id.slice(4)}/${encodeURIComponent(file.fileName)}`
+}
+
 async function resolveDownloadUrl(file: CurseForgeFile): Promise<string> {
   if (file.downloadUrl) return file.downloadUrl
+  // Many authors disable the API's third-party download URL while the CDN file
+  // itself remains public. PCL uses the same deterministic CDN path.
+  const derived = derivedCdnUrl(file)
+  if (derived) return derived
   const raw = await fetchJson<{ data?: string | null }>(`${API}/mods/${file.modId}/files/${file.id}/download-url`, {
     headers: headers(),
     timeout: 20_000
   })
-  if (!raw.data) throw new Error(`「${file.displayName}」的作者未开放第三方下载`)
+  if (!raw.data) throw new Error(`「${file.displayName}」没有可用的下载地址`)
   return raw.data
 }
 
@@ -311,7 +325,7 @@ interface CurseForgeManifest {
   overrides?: string
 }
 
-export async function installCurseForgePack(opts: CurseForgePackInstallOptions): Promise<{ instanceId: string }> {
+export async function installCurseForgePack(opts: CurseForgePackInstallOptions): Promise<CurseForgePackInstallResult> {
   const mod = await getCurseForgeMod(opts.modId)
   const files = await getCurseForgeFiles(opts.modId)
   const target = opts.fileId ? files.find((file) => file.id === opts.fileId) : files[0]
@@ -371,34 +385,79 @@ export async function installCurseForgePack(opts: CurseForgePackInstallOptions):
     await cleanupInstallVersions(before, inst.versionId)
 
     const fileList = (manifest.files ?? []).filter((file) => file.required !== false)
+    const totalMemory = Number(systemInfo().memoryMB ?? 0)
+    const memoryCap = totalMemory > 0 ? Math.max(4096, Math.floor((totalMemory * 0.7) / 256) * 256) : 8192
+    const wantedMemory = fileList.length >= 220 ? 8192 : fileList.length >= 90 ? 6144 : fileList.length >= 50 ? 5120 : 0
+    const packMemory = wantedMemory ? Math.min(wantedMemory, memoryCap) : undefined
+    await updateInstance(inst.id, {
+      notes: `由 CurseForge 整合包 ${mod.name} ${target.fileName} 安装`,
+      ...(packMemory ? { memory: packMemory } : {})
+    })
     const modsDir = path.join(inst.gameDir, 'mods')
     await ensureDir(modsDir)
     const dlStep = group.step('下载整合包模组', fileList.length)
     dlStep.start(fileList.length)
+    const missing: CurseForgeMissingMod[] = []
+    const projectInfoCache = new Map<number, Promise<{ name: string; classId: number }>>()
+    const resolveProject = (projectId: number): Promise<{ name: string; classId: number }> => {
+      const cached = projectInfoCache.get(projectId)
+      if (cached) return cached
+      const pending = getCurseForgeMod(projectId)
+        .then((info) => ({ name: info.name, classId: info.classId }))
+        .catch(() => ({ name: `项目 ${projectId}`, classId: 6 }))
+      projectInfoCache.set(projectId, pending)
+      return pending
+    }
     let done = 0
     await runPool(
       fileList,
       8,
       async (entry) => {
+        let file: CurseForgeFile | null = null
         try {
-          const file = await getCurseForgeFile(entry.projectID, entry.fileID)
+          file = await getCurseForgeFile(entry.projectID, entry.fileID)
+          let destDir = modsDir
+          if (!/\.jar$/i.test(file.fileName)) {
+            const info = await resolveProject(entry.projectID)
+            const classId = info.classId === 6 ? 12 : info.classId
+            if (classId === 4471 || classId === 17) {
+              consoleLog('launcher', 'info', `跳过非模组文件：${info.name}（类别 ${classId}）`)
+              return
+            }
+            destDir = classId === 6552 ? path.join(inst.gameDir, 'shaderpacks') : path.join(inst.gameDir, 'resourcepacks')
+          }
+          await ensureDir(destDir)
           await downloadFile({
             url: await resolveDownloadUrl(file),
-            dest: path.join(modsDir, safeFileName(file.fileName)),
+            dest: path.join(destDir, safeFileName(file.fileName)),
             sha1: sha1Of(file),
             size: file.fileLength || undefined,
             signal: group.signal,
             retries: 2
           })
         } catch (e) {
-          consoleLog('launcher', 'warn', `整合包文件 ${entry.projectID}/${entry.fileID} 下载失败: ${String(e)}`)
+          const info = await resolveProject(entry.projectID)
+          const reason = (e instanceof Error ? e.message : String(e)).slice(0, 240)
+          missing.push({
+            projectId: entry.projectID,
+            fileId: entry.fileID,
+            name: info.name,
+            fileName: file?.fileName,
+            reason
+          })
+          consoleLog('launcher', 'warn', `整合包模组缺失：${info.name}（项目 ${entry.projectID} / 文件 ${entry.fileID}）: ${reason}`)
+        } finally {
+          done++
+          dlStep.progress(done, `${done}/${fileList.length}`)
         }
-        done++
-        dlStep.progress(done, `${done}/${fileList.length}`)
       },
       group.signal
     )
     dlStep.done()
+    missing.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+    if (missing.length) {
+      consoleLog('launcher', 'warn', `整合包有 ${missing.length} 个模组未能安装：${missing.map((item) => item.name).join('、')}`)
+    }
 
     await fsp.rm(extractDir, { recursive: true, force: true })
     await fsp.mkdir(extractDir, { recursive: true })
@@ -408,7 +467,7 @@ export async function installCurseForgePack(opts: CurseForgePackInstallOptions):
       if (existsSync(src)) await fsp.cp(src, inst.gameDir, { recursive: true, force: true })
     }
     group.finish('done')
-    return { instanceId: inst.id }
+    return { instanceId: inst.id, missing }
   } catch (e) {
     group.fail(e)
     throw e
