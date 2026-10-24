@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+.aurora-home/
+.e2e-home/
+.mc26-home/
+.smoke-home/
+.sfx-test/
+.npm-cache/
+.probe/
+*.log
+.DS_Store
+Thumbs.db
+.aurora/
+.probe-rename/
+.tmp-*
+nul
