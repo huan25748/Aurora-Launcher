@@ -1,0 +1,47 @@
+{
+  "name": "aurora-launcher",
+  "version": "1.0.60",
+  "description": "Aurora Launcher - a modern Minecraft launcher",
+  "main": "dist/main/index.js",
+  "author": "Aurora",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "build:local": "node scripts/build-local.mjs",
+    "start": "node scripts/start.mjs",
+    "preview": "node scripts/build-local.mjs && node scripts/preview.mjs",
+    "package": "node scripts/package.mjs",
+    "test:e2e": "node scripts/test/run-all.mjs e2e",
+    "test:all": "node scripts/test/run-all.mjs all",
+    "test:render": "node scripts/build-local.mjs && node scripts/test/render-smoke.mjs",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "package:single": "node scripts/make-single-exe.mjs",
+    "test:mc26": "node scripts/test/run-all.mjs mc26",
+    "test:forge-fast": "node scripts/test/run-all.mjs forge-fast",
+    "test:portable": "node scripts/test/run-all.mjs portable"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "lucide-react": "^1.61.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^33.4.11",
+    "esbuild": "^0.25.12",
+    "jsdom": "^30.1.3",
+    "typescript": "5.9",
+    "vite": "^7.3.7"
+  }
+}
