@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>AuroraLauncher</AssemblyName>
+    <RootNamespace>AuroraLauncher</RootNamespace>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="mcmod-names.json">
+      <LogicalName>AuroraLauncher.mcmod-names.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets.zip">
+      <LogicalName>AuroraLauncher.assets.zip</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="lib\WebView2Loader.dll">
+      <LogicalName>AuroraLauncher.webview2loader.dll</LogicalName>
+    </EmbeddedResource>
+    <Compile Remove="selftest\**" />
+    <None Remove="selftest\**" />
+    <Page Remove="selftest\**" />
+    <Reference Include="Microsoft.Web.WebView2.Core">
+      <HintPath>lib\Microsoft.Web.WebView2.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.Wpf">
+      <HintPath>lib\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Content Include="lib\WebView2Loader.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <None Update="web\aurora-shim.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="renderer\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="CopyWebView2Loader" AfterTargets="Build">
+    <Copy SourceFiles="lib\WebView2Loader.dll" DestinationFolder="$(OutDir)" />
+  </Target>
+  <Target Name="CopyWebView2LoaderPublish" AfterTargets="Publish">
+    <Copy SourceFiles="lib\WebView2Loader.dll" DestinationFolder="$(PublishDir)" />
+  </Target>
+
+</Project>
+
