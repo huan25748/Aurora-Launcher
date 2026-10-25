@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net6.0-windows</TargetFramework><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\AppPaths.cs" Link="AppPaths.cs" />
+    <Compile Include="..\JavaService.cs" Link="JavaService.cs" />
+    <Compile Include="..\VersionService.cs" Link="VersionService.cs" />
+    <Compile Include="..\DownloadService.cs" Link="DownloadService.cs" />
+    <Compile Include="..\MinecraftInstallService.cs" Link="MinecraftInstallService.cs" />
+    <Compile Include="..\AccountService.cs" Link="AccountService.cs" />
+    <Compile Include="..\GameEvents.cs" Link="GameEvents.cs" />
+    <Compile Include="..\LaunchService.cs" Link="LaunchService.cs" />
+    <Compile Include="..\BridgeService.cs" Link="BridgeService.cs" />
+    <Compile Include="..\LoaderService.cs" Link="LoaderService.cs" />
+    <Compile Include="..\ForgeService.cs" Link="ForgeService.cs" />
+    <Compile Include="..\ForgeManualInstaller.cs" Link="ForgeManualInstaller.cs" />
+    <Compile Include="..\ProgressService.cs" Link="ProgressService.cs" />
+    <Compile Include="..\ModrinthService.cs" Link="ModrinthService.cs" />
+    <Compile Include="..\NetworkService.cs" Link="NetworkService.cs" />
+    <Compile Include="..\ContentService.cs" Link="ContentService.cs" />
+    <Compile Include="..\OptiFineService.cs" Link="OptiFineService.cs" />
+    <Compile Include="..\LogService.cs" Link="LogService.cs" />
+    <Compile Include="..\ServerPingService.cs" Link="ServerPingService.cs" />
+    <Compile Include="..\SystemService.cs" Link="SystemService.cs" />
+    <Compile Include="..\CurseForgeService.cs" Link="CurseForgeService.cs" />
+    <Compile Include="..\UpdateService.cs" Link="UpdateService.cs" />
+    <Compile Include="..\MicrosoftAuthService.cs" Link="MicrosoftAuthService.cs" />
+    <Compile Include="..\AuthlibService.cs" Link="AuthlibService.cs" />
+    <Compile Include="..\AuthlibInjectorService.cs" Link="AuthlibInjectorService.cs" />
+    <Compile Include="..\NbtServersService.cs" Link="NbtServersService.cs" />
+    <Compile Include="..\ModNamesService.cs" Link="ModNamesService.cs" />
+    <Compile Include="..\NewsService.cs" Link="NewsService.cs" />
+    <Compile Include="..\ServerStoreService.cs" Link="ServerStoreService.cs" />
+    <Compile Include="..\InstanceArchiveService.cs" Link="InstanceArchiveService.cs" />
+  </ItemGroup>
+</Project>
+
