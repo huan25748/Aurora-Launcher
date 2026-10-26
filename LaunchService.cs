@@ -22,6 +22,216 @@ namespace AuroraLauncher
             lock (Gate) return (JsonObject)JsonNode.Parse(_state.ToJsonString())!;
         }
 
+        private static string AdoptOfflineUuid(string current, string gameDir)
+        {
+            try
+            {
+                var mapped = ReadUuidMap(gameDir);
+                if (mapped != null)
+                {
+                    SyncPlayerData(gameDir, mapped.Value.Owner, mapped.Value.Offline, false);
+                    MigrateFtbTeams(gameDir, mapped.Value.Owner, mapped.Value.Offline);
+                    return mapped.Value.Owner;
+                }
+                var saves = Path.Combine(gameDir, "saves");
+                if (!Directory.Exists(saves)) return current;
+                var candidates = new List<(string Uuid, DateTime Time)>();
+                foreach (var world in Directory.GetDirectories(saves))
+                {
+                    var playerData = Path.Combine(world, "playerdata");
+                    if (!Directory.Exists(playerData)) continue;
+                    foreach (var file in Directory.GetFiles(playerData, "*.dat"))
+                    {
+                        var uuid = Path.GetFileNameWithoutExtension(file).Replace("-", "");
+                        if (uuid.Length != 32 || !uuid.All(Uri.IsHexDigit)) continue;
+                        candidates.Add((uuid.ToLowerInvariant(), File.GetLastWriteTimeUtc(file)));
+                    }
+                }
+                if (candidates.Count == 0) return current;
+                var normalized = current.Replace("-", "").ToLowerInvariant();
+                var distinct = candidates
+                    .GroupBy(item => item.Uuid)
+                    .Select(group => group.OrderByDescending(item => item.Time).First())
+                    .ToList();
+                // Prefer the UUID that already owns the world, not the offline UUID
+                // that a previous failed offline launch may have just created.
+                var owner = distinct
+                    .Where(item => !string.Equals(item.Uuid, normalized, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(item => item.Time)
+                    .FirstOrDefault();
+                if (owner.Uuid != null)
+                {
+                    MigrateOfflinePlayerData(gameDir, owner.Uuid, normalized);
+                    return owner.Uuid;
+                }
+                return distinct.OrderByDescending(item => item.Time).First().Uuid;
+            }
+            catch { return current; }
+        }
+
+        private static (string Owner, string Offline)? ReadUuidMap(string gameDir)
+        {
+            try
+            {
+                var saves = Path.Combine(gameDir, "saves");
+                foreach (var name in new[] { ".aurora-offline-uuid-map" })
+                {
+                    var file = Path.Combine(saves, name);
+                    if (!File.Exists(file)) continue;
+                    string? owner = null, offline = null;
+                    foreach (var line in File.ReadAllLines(file))
+                    {
+                        if (line.StartsWith("owner=")) owner = line[6..].Trim();
+                        else if (line.StartsWith("offline=")) offline = line[8..].Trim();
+                    }
+                    if (owner != null && offline != null) return (owner, offline);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void MigrateOfflinePlayerData(string gameDir, string ownerUuid, string offlineUuid)
+        {
+            try
+            {
+                var saves = Path.Combine(gameDir, "saves");
+                if (!Directory.Exists(saves)) return;
+                var owner = Guid.Parse(ownerUuid).ToString();
+                var offline = Guid.Parse(offlineUuid).ToString();
+                var map = Path.Combine(saves, ".aurora-offline-uuid-map");
+                var firstRun = !File.Exists(map);
+                if (firstRun)
+                {
+                    // First migration: the online player is the source of truth.
+                    SyncPlayerData(gameDir, owner, offline, true);
+                    File.WriteAllText(map, "owner=" + owner + "\noffline=" + offline + "\n");
+                }
+                else
+                {
+                    SyncPlayerData(gameDir, owner, offline, false);
+                }
+                MigrateFtbTeams(gameDir, owner, offline);
+            }
+            catch { }
+        }
+
+        private static void MigrateFtbTeams(string gameDir, string ownerUuid, string offlineUuid)
+        {
+            try
+            {
+                var saves = Path.Combine(gameDir, "saves");
+                if (!Directory.Exists(saves)) return;
+                var owner = Guid.Parse(ownerUuid).ToString();
+                var offline = Guid.Parse(offlineUuid).ToString();
+                foreach (var world in Directory.GetDirectories(saves))
+                {
+                    var playerDir = Path.Combine(world, "ftbteams", "player");
+                    if (!Directory.Exists(playerDir)) continue;
+                    var ownerFile = Path.Combine(playerDir, owner + ".snbt");
+                    var offlineFile = Path.Combine(playerDir, offline + ".snbt");
+                    try
+                    {
+                        if (File.Exists(ownerFile))
+                        {
+                            // FTB Teams looks up the player by the team file name.
+                            // Move the owner's personal team to the offline player's
+                            // name, keeping the original team id in the file. This
+                            // avoids spawning a second empty team/island.
+                            File.Copy(ownerFile, ownerFile + ".aurora-owner-backup", true);
+                            File.Move(ownerFile, offlineFile, true);
+                            var text = File.ReadAllText(offlineFile);
+                            if (!text.Contains(offline, StringComparison.OrdinalIgnoreCase))
+                            {
+                                var marker = "ranks: {";
+                                var index = text.IndexOf(marker, StringComparison.Ordinal);
+                                if (index >= 0)
+                                    text = text.Insert(index + marker.Length,
+                                        "\n\t\t" + offline + ": \"owner\"");
+                            }
+                            File.WriteAllText(offlineFile, text);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static void RestoreFtbTeams(string gameDir, string ownerUuid, string offlineUuid)
+        {
+            try
+            {
+                var saves = Path.Combine(gameDir, "saves");
+                if (!Directory.Exists(saves)) return;
+                var owner = Guid.Parse(ownerUuid).ToString();
+                var offline = Guid.Parse(offlineUuid).ToString();
+                foreach (var world in Directory.GetDirectories(saves))
+                {
+                    var playerDir = Path.Combine(world, "ftbteams", "player");
+                    if (!Directory.Exists(playerDir)) continue;
+                    var ownerFile = Path.Combine(playerDir, owner + ".snbt");
+                    var offlineFile = Path.Combine(playerDir, offline + ".snbt");
+                    try
+                    {
+                        if (!File.Exists(ownerFile) && File.Exists(offlineFile))
+                            File.Copy(offlineFile, ownerFile, true);
+                        if (File.Exists(offlineFile) && File.Exists(ownerFile))
+                            File.Move(offlineFile, offlineFile + ".aurora-backup", true);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static void SyncPlayerData(string gameDir, string ownerUuid, string offlineUuid, bool preferOwner)
+        {
+            try
+            {
+                var owner = Guid.Parse(ownerUuid).ToString();
+                var offline = Guid.Parse(offlineUuid).ToString();
+                var saves = Path.Combine(gameDir, "saves");
+                if (!Directory.Exists(saves)) return;
+                foreach (var world in Directory.GetDirectories(saves))
+                {
+                    foreach (var (folder, extension) in new[]
+                    {
+                        ("playerdata", ".dat"),
+                        ("playerdata", ".dat_old"),
+                        ("playerdata", ".cosarmor"),
+                        ("stats", ".json"),
+                        ("advancements", ".json")
+                    })
+                    {
+                        var ownerFile = Path.Combine(world, folder, owner + extension);
+                        var offlineFile = Path.Combine(world, folder, offline + extension);
+                        var ownerExists = File.Exists(ownerFile);
+                        var offlineExists = File.Exists(offlineFile);
+                        try
+                        {
+                            if (!ownerExists && !offlineExists) continue;
+                            var ownerTime = ownerExists ? File.GetLastWriteTimeUtc(ownerFile) : DateTime.MinValue;
+                            var offlineTime = offlineExists ? File.GetLastWriteTimeUtc(offlineFile) : DateTime.MinValue;
+                            var ownerWins = preferOwner || !offlineExists || (ownerExists && ownerTime >= offlineTime);
+                            if (ownerWins && ownerExists)
+                            {
+                                if (offlineExists) File.Copy(offlineFile, offlineFile + ".aurora-backup", true);
+                                File.Copy(ownerFile, offlineFile, true);
+                            }
+                            else if (offlineExists)
+                            {
+                                if (ownerExists) File.Copy(ownerFile, ownerFile + ".aurora-backup", true);
+                                File.Copy(offlineFile, ownerFile, true);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static void ApplyFirstLaunchLanguage(JsonObject instance, string instanceId, string gameDir, JsonObject settings)
         {
             if (settings["firstLaunchChinese"]?.GetValue<bool>() != true) return;
@@ -78,6 +288,13 @@ namespace AuroraLauncher
 
                 var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", versionId);
                 Directory.CreateDirectory(gameDir);
+                if (account["type"]?.GetValue<string>() == "offline")
+                {
+                    // PCL keeps each profile's own UUID; an offline profile is a
+                    // different player and must never rewrite a Microsoft world.
+                    // Use its UUID as the token, exactly like PCL's legacy login.
+                    accessToken = uuid;
+                }
                 ApplyFirstLaunchLanguage(instance, instanceId, gameDir, settings);
 
                 var requiredJava = version["javaVersion"]?["majorVersion"]?.GetValue<int>() ?? 8;
@@ -120,13 +337,16 @@ namespace AuroraLauncher
                     ["${auth_access_token}"] = accessToken,
                     ["${access_token}"] = accessToken,
                     ["${auth_session}"] = accessToken,
-                    ["${user_type}"] = account["type"]?.GetValue<string>() == "microsoft" ? "msa" : "legacy",
+                    // PCL always passes "msa". Using "legacy" makes the integrated
+                    // server recompute the UUID from the username, so an offline
+                    // account can never open a world created by a Microsoft account.
+                    ["${user_type}"] = "msa",
                     ["${libraries_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
                     ["${game_assets}"] = Path.Combine(AppPaths.RootDir, "assets", "virtual", "legacy"),
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "1.1.0",
+                    ["${launcher_version}"] = "1.1.9",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -158,7 +378,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=1.1.0");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=1.1.9");
                 AddJvm("-Dsun.stdout.encoding", "-Dsun.stdout.encoding=UTF-8");
                 AddJvm("-Dsun.stderr.encoding", "-Dsun.stderr.encoding=UTF-8");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
@@ -186,7 +406,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=1.1.0");
+                args.Add("-Dminecraft.launcher.version=1.1.9");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))

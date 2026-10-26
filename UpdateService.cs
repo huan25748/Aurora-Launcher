@@ -12,7 +12,7 @@ namespace AuroraLauncher
 
         public static async Task<JsonObject> Check(bool force)
         {
-            var current = "1.1.0";
+            var current = "1.1.9";
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, ApiUrl);

@@ -1,105 +1,312 @@
-# Aurora Launcher 1.1.0（WPF / WebView2）
+# Aurora Launcher
 
-这是 Electron 版 Aurora Launcher 1.0.78 的 .NET WPF 迁移工程。
+Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器，当前版本 **1.1.8**。
 
-## 当前阶段
+项目前身是 Electron 版 Aurora Launcher 1.0.78；本仓库是使用 **.NET 6 + WPF + WebView2** 重写的当前版本。
 
-第二阶段（进行中）：可运行的 WPF + WebView2 外壳，并开始迁移真实 C# 后端。
+界面继续复用原有 React 渲染层，下载、安装、Java 管理、账户、启动和实例管理已迁移到 C# 后端。
 
-已实现：
+## 下载
 
-- WPF 窗口与 1.1.0 版本号
-- 复用 Electron 版打包后的完整 React 界面（`renderer/`）
-- WebView2 本地虚拟站点加载，不依赖本地 HTTP 端口
-- 启动器目录隔离：
-  - 游戏目录：`<exe目录>/.minecraft`
-  - 配置目录：`<exe目录>/.aurora`
-- 自动创建 `.minecraft` 基础目录
-- 扫描 `.minecraft/instances/*/instance.json` 供界面实例列表读取
-- C# RPC 桥：前端 `invoke` → WebView2 消息 → `BridgeService` → JSON 响应
-- 设置持久化到 `<exe目录>/.aurora/config.json`
-- 实例列表/实例详情/实例更新读取真实 `instance.json`
-- `app.info` 返回真实目录、实例数、版本数
-- C# Java 扫描：runtime、JAVA_HOME、PATH、常见 JDK 安装目录
-- C# Java 运行时下载：Mojang all.json、组件清单、SHA1 校验，安装到 `.minecraft/runtime`，支持删除托管 Java
-- 实例 CRUD：创建、更新、删除、复制、大小统计、打开目录
-- 内容管理：mods / resourcepacks / shaderpacks / datapacks 列表、启停、删除、导入
-- 设置：切换游戏文件夹、恢复便携目录、系统信息、存储统计/清理
-- 世界与截图读取、世界备份、世界删除
-- 连通性检测：Mojang、BMCLAPI、Forge/NeoForge/Fabric/Quilt、Modrinth、OptiFine 节点
-- C# 版本清单读取与缓存，支持官方/BMCLAPI 回退
-- C# 已安装版本扫描、loader 类型识别、Java 版本要求、版本大小
-- C# 离线账户：添加、列表、切换、删除，持久化到 `.aurora/accounts.json`
-- C# 原版安装：版本 JSON、client jar、libraries、natives、asset index、assets objects
-- 安装完成后创建真实实例并写入 `instances/<id>/instance.json`
-- C# 原版 / Fabric / Quilt 启动：版本 chain、classpath、natives 解压、JVM/game 参数替换、Java 选择、离线账户
-- 启动状态与游戏日志通过 C# 事件推送到前端
-- 已用真实 1.21.1 安装+离线启动验证到主菜单
-- 已用真实 Fabric Loader 0.16.9 + 1.21.1 安装并启动到主菜单
-- 游戏进程不再重定向 stdout/stderr，改从 `logs/latest.log` 读取日志，避免 Windows 管道导致 Fabric 首次 remap 失败
-- 窗口最小化 / 最大化 / 关闭 / 标题消息桥
+- 蓝奏云：<https://mobaijianhe.lanzouc.com/b01euviyte>
+- 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
-尚未实现（后续阶段）：
+---
 
-- Microsoft / 离线 / Authlib 账户系统
-- Forge、NeoForge、OptiFine 安装（Fabric/Quilt 已实现；Forge/NeoForge 已改为手动解析安装器，待 Forge 服务器恢复后验证）
-- 游戏启动已实现原版基础路径；崩溃分析待实现
-- Modrinth 搜索 / 项目 / 版本 / 下载安装已实现
-- OptiFine 版本列表与直接放入 mods 的下载接口
-- 游戏日志读取、日志文件列表、简单崩溃原因分析
-- Minecraft 服务器状态 ping：版本、人数、MOTD、延迟、图标
-- CurseForge、整合包尚未实现
-- 内容管理、世界、服务器、截图
-- 存储统计、清理、更新检查
-- 与 1.0.78 完全一致的全部后端行为
+## 特性
 
-当前 `web/aurora-shim.js` 中未实现的后端接口仍返回空数据或占位结果。界面可正常浏览，设置和实例读取已接真实 C# 后端，但安装、启动和下载尚未迁移，不能当作完整启动器使用。
+### 游戏与加载器
 
-## 单文件版
-
-发布产物：
+- 原版 Minecraft 安装与启动。
+- Fabric、Quilt、Forge、NeoForge 安装流程。
+- OptiFine 版本下载，支持放入 Forge 实例的 `mods` 目录。
+- 原版下载页支持：
 
 ```text
-release/AuroraLauncher-1.1.0.exe
+正式版
+快照
+愚人节
+远古版本
+全部
 ```
 
-单文件包含：
+- 愚人节版本同时支持已知历史版本和“快照 + 4 月 1 日”自动识别。
+- 版本清单支持 Mojang 官方与 BMCLAPI 镜像。
 
-- WPF 程序
-- React 界面（`assets.zip` 内嵌）
-- `aurora-shim.js`
-- `WebView2Loader.dll`
+### Java 管理
 
-首次运行会解压界面资源到：
+- 扫描启动器内置 runtime、HMCL/PCL 的 `mojang-jre-legacy`、JAVA_HOME、PATH、常见 JDK 目录。
+- 支持下载 Mojang Java 运行时。
+- 下载后检查 `bin/java.exe`、`lib/rt.jar`、`lib/modules`，避免使用不完整运行时。
+- 按游戏版本、Forge 版本和 OptiFine 选择 Java。
+- 包括：
 
 ```text
-<exe目录>/.aurora/app
+Forge 1.16（34.0.0 ～ 36.2.25）最高 Java 8u321
+Forge 1.16（36.2.26+）按 Minecraft 版本要求
+Forge 1.12 及以下最高 Java 8
+Forge 1.13 ～ 1.14  Java 8 ～ 10
+Forge 1.15          Java 8 ～ 15
+Minecraft 1.17      至少 Java 16
+Minecraft 1.18+     至少 Java 17
+Minecraft 1.20.5+   至少 Java 21
 ```
 
-运行要求：
+### 账户
 
+- Microsoft 账户：OAuth 设备代码登录。
+- Authlib-Injector 第三方登录。
+- 离线账户。
+- 账户数据保存在：
+
+```text
+<exe目录>/.aurora/accounts.json
+```
+
+离线账户与 Microsoft 账户按照 PCL 的语义分别使用自己的 UUID。启动器不会自动把正版存档复制给离线账户，也不会改写世界里的 FTB Teams 数据。
+
+### 实例
+
+- 每个实例拥有独立的 `instance.json`。
+- 新安装的游戏生成自包含版本目录。
+- 导入已有版本时直接引用原目录：
+
+```text
+instance.gameDir = 原版本目录
+```
+
+不会复制 mods、saves、config，也不会产生重复存档。
+
+- 每次启动启动器都会扫描游戏目录下的 `versions`。
+- 自动导入尚未登记的版本。
+- 已导入实例会检查加载器类型：
+
+```text
+neoforge
+forge
+fabric
+quilt
+vanilla
+```
+
+- 之前被误判为原版的 NeoForge 实例会自动修正。
+- 支持实例复制、导出、导入、删除和整合包导出。
+
+### 下载
+
+- 官方源与 BMCLAPI 自动切换。
+- 大文件 Range 分段下载。
+- 下载失败重试、连接超时、无数据超时。
+- 并发下载客户端、依赖库和资源文件。
+- 下载进度按实际步骤显示。
+- 支持 Modrinth、CurseForge 搜索、详情、版本与安装。
+- 支持本地 `.mrpack` 导入。
+- 支持整合包安装与实例创建。
+
+### 内容管理
+
+- 模组。
+- 资源包。
+- 光影。
+- 数据包。
+- 世界。
+- 截图。
+- 服务器列表。
+- 日志。
+- 实例设置。
+
+### 资讯
+
+- 首页显示最新正式版与最新预览版。
+- 版本资讯来自 PCL2 新闻主页 API：
+
+```text
+https://news.bugjump.net/apis/versions/latest
+```
+
+- 完整更新日志来自 PCL2-NewsHomepage 的版本 Markdown。
+- 读取版本 Markdown 文件头中的封面图。
+- 点击资讯打开站内阅读弹窗，不直接跳转浏览器。
+- 弹窗显示标题、日期、完整正文、来源链接。
+- 右上角“更多”打开 Minecraft 官方文章页：
+
+```text
+https://www.minecraft.net/zh-hans/article
+```
+
+- 普通 Mojang 新闻从官方 `news.json` 合并读取。
+
+### 启动
+
+- 版本 chain 合并。
+- classpath 生成。
+- 同名依赖去重，保留更高版本。
+- natives 解压。
+- JVM 参数与游戏参数替换。
+- 启动前处理首次启动语言。
+- 关闭启动器窗口不会结束正在运行的游戏。
+- 游戏日志从 `logs/latest.log` 读取，不再重定向 stdout/stderr。
+- 崩溃分析支持：
+
+```text
+Java 版本与 Forge 不兼容
+Java 运行时损坏
+log4j / ModLauncher 签名不匹配
+常见缺失前置与类加载错误
+```
+
+### 界面
+
+- WPF 无边框窗口。
+- WebView2 加载本地界面。
+- 深色 / 浅色主题。
+- 实例卡片封面与加载器图标。
+- 窗口缩放、拖动、最小化、最大化。
+- 控制台默认收起。
+
+### 其他
+
+- 更新检查：读取 GitHub Releases。
+- 存储占用统计。
+- 缓存与安装器残留清理。
+- 未使用依赖库与资源精简。
+- 本地日志与操作记录。
+
+---
+
+## 目录结构
+
+```text
+<exe目录>/
+├─ .aurora/
+│  ├─ config.json
+│  ├─ accounts.json
+│  ├─ logs/
+│  ├─ cache/
+│  └─ app/
+└─ .minecraft/
+   ├─ versions/
+   ├─ libraries/
+   ├─ assets/
+   ├─ runtime/
+   ├─ instances/
+   └─ saves/
+```
+
+配置、账户和日志与游戏数据分离，移动启动器目录时可整体迁移。
+
+---
+
+## 运行要求
+
+- Windows 10 / Windows 11
 - .NET 6 Desktop Runtime
 - WebView2 Runtime
 
-说明：单文件版为框架依赖单文件，不包含 .NET 运行时本身。
+发布版是框架依赖单文件，不包含 .NET 运行时。
+
+---
 
 ## 构建
 
-环境要求：
-
-- .NET 6 SDK / Windows Desktop Runtime
-- WebView2 Runtime
-- `lib/` 下的 WebView2 SDK 程序集
-
 ```powershell
 dotnet build -c Release -p:UseSharedCompilation=false
-dotnet publish -c Release -o release -p:UseSharedCompilation=false
+
+dotnet publish -c Release -r win-x64 `
+  --self-contained false `
+  -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true `
+  -o single
 ```
 
-运行：
+界面资源需要重新打包：
 
 ```text
-release/AuroraLauncher.exe
+renderer/
+web/aurora-shim.js
+→ assets.zip
 ```
 
-注意：在当前 DSH 受限沙箱下，`dotnet` 的 C# 编译器需要通过管道输出，必须使用完整访问权限构建；普通终端不受此限制。
+`assets.zip` 会作为嵌入资源打进 exe，首次运行时解压到 `.aurora/app`。
+
+`lib/` 下需要保留 WebView2 SDK 程序集。
+
+---
+
+## 项目状态
+
+- 原版、Fabric、Quilt、Forge、NeoForge 安装流程已接入。
+- Forge 1.16.5 的完整安装与启动已实机验证。
+- NeoForge、Forge 其他版本的兼容矩阵仍在持续验证。
+- 离线账户与 Microsoft 账户的存档按 UUID 独立，不提供跨账户自动迁移。
+- 当前主要面向 Windows x64。
+
+---
+
+## 特别鸣谢
+
+本项目使用了以下镜像、数据接口与开放资源：
+
+### Light-Beacon / PCL2-NewsHomepage
+
+PCL2 新闻主页 API 与版本更新日志数据。
+
+- https://github.com/Light-Beacon/PCL2-NewsHomepage
+- https://news.bugjump.net/
+
+### bangbang93 / BMCLAPI
+
+提供 BMCLAPI 镜像源与 Forge 安装工具。
+
+- https://bmclapi.bangbang93.com/
+
+### MC 百科
+
+提供模组中文名称与相关资料。
+
+- https://www.mcmod.cn/
+
+### z0z0r4 / MCIM
+
+提供社区资源镜像与帮助库。
+
+- https://www.mcimirror.top/
+
+### Modrinth
+
+提供模组、整合包、资源包、光影的数据与下载接口。
+
+- https://modrinth.com/
+
+### CurseForge
+
+提供模组与整合包数据接口。
+
+- https://www.curseforge.com/
+
+### MyMemory
+
+提供中文搜索词转英文的免费翻译接口。
+
+- https://mymemory.translated.net/
+
+### Crafatar / MC-Heads
+
+提供玩家头像渲染与皮肤预览。
+
+- https://crafatar.com/
+- https://mc-heads.net/
+
+### PCL / PCL-CE
+
+Plain Craft Launcher 项目作为 Java 选择、账户语义、安装与启动行为的参考。
+
+感谢以上项目与服务的作者和贡献者。
+
+---
+
+## 免责声明
+
+本项目与 Mojang Studios、Microsoft 无隶属关系。
+
+Minecraft 是 Mojang Studios 的商标。

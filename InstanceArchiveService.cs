@@ -125,22 +125,167 @@ namespace AuroraLauncher
             return instance;
         }
 
-        public static int ImportExisting()
+        public static int ImportExisting(bool includeLooseVersions = true)
         {
             var versionsDir = Path.Combine(AppPaths.RootDir, "versions");
             if (!Directory.Exists(versionsDir)) return 0;
-            var existing = BridgeService.ListInstances().OfType<JsonObject>()
-                .Select(item => item["versionId"]?.GetValue<string>() ?? "").ToHashSet();
+            var instances = BridgeService.ListInstances().OfType<JsonObject>().ToList();
+            var existing = instances
+                .Select(item => new { VersionId = item["versionId"]?.GetValue<string>() ?? "", Instance = item })
+                .Where(item => item.VersionId.Length > 0)
+                .GroupBy(item => item.VersionId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First().Instance, StringComparer.OrdinalIgnoreCase);
             var count = 0;
             foreach (var directory in Directory.GetDirectories(versionsDir))
             {
                 var id = Path.GetFileName(directory);
-                if (existing.Contains(id) || !File.Exists(Path.Combine(directory, id + ".json"))) continue;
-                MinecraftInstallService.CreateInstance(id, id);
-                count++;
+                if (!File.Exists(Path.Combine(directory, id + ".json"))) continue;
+                var (mcVersion, loader, loaderVersion) = DetectVersionInfo(id, directory);
+                if (existing.TryGetValue(id, out var current))
+                {
+                    // Repair older imports that were classified as vanilla before
+                    // NeoForge/Forge detection was fixed.
+                    if (current["imported"]?.GetValue<bool>() == true
+                        && (current["loader"]?.GetValue<string>() != loader
+                            || current["loaderVersion"]?.GetValue<string>() != loaderVersion))
+                    {
+                        current["loader"] = loader;
+                        current["loaderVersion"] = loaderVersion;
+                        current["mcVersion"] = mcVersion;
+                        current["icon"] = loader switch
+                        {
+                            "fabric" => "🧵",
+                            "quilt" => "🧶",
+                            "forge" => "🔨",
+                            "neoforge" => "⚙️",
+                            "optifine" => "🎨",
+                            _ => "🧊"
+                        };
+                        var file = Path.Combine(AppPaths.InstancesDir, current["id"]?.GetValue<string>() ?? "", "instance.json");
+                        if (File.Exists(file))
+                            File.WriteAllText(file, current.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                        count++;
+                    }
+                    continue;
+                }
+                // Aurora's own instance folders can be restored even when other instances exist.
+                var saved = Path.Combine(directory, "instance.json");
+                if (!includeLooseVersions && !File.Exists(saved)) continue;
+                var gameDir = DetectGameDir(id);
+                if (CreateImportedInstance(id, id, gameDir, mcVersion, loader, loaderVersion))
+                {
+                    existing[id] = new JsonObject();
+                    count++;
+                }
             }
             if (count > 0) BridgeService.NotifyInstances();
             return count;
+        }
+
+        private static bool CreateImportedInstance(string versionId, string name, string gameDir, string mcVersion, string loader, string? loaderVersion)
+        {
+            try
+            {
+                var instancesDir = AppPaths.InstancesDir;
+                Directory.CreateDirectory(instancesDir);
+                var id = "inst-" + Guid.NewGuid().ToString("N")[..12];
+                var directory = Path.Combine(instancesDir, id);
+                Directory.CreateDirectory(directory);
+                var json = new JsonObject
+                {
+                    ["id"] = id,
+                    ["name"] = name,
+                    ["versionId"] = versionId,
+                    ["sourceVersionId"] = versionId,
+                    ["selfContained"] = false,
+                    ["imported"] = true,
+                    ["mcVersion"] = mcVersion,
+                    ["loader"] = loader,
+                    ["loaderVersion"] = loaderVersion,
+                    ["gameDir"] = gameDir,
+                    ["icon"] = loader switch
+                    {
+                        "fabric" => "🧵",
+                        "quilt" => "🧶",
+                        "forge" => "🔨",
+                        "neoforge" => "⚙️",
+                        "optifine" => "🎨",
+                        _ => "🧊"
+                    },
+                    ["color"] = "ocean",
+                    ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["totalPlayTimeMs"] = 0,
+                    ["playCount"] = 0
+                };
+                File.WriteAllText(Path.Combine(directory, "instance.json"), json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string DetectGameDir(string versionId)
+        {
+            var versionPath = Path.Combine(AppPaths.RootDir, "versions", versionId);
+            var markers = new[] { "mods", "saves", "resourcepacks", "shaderpacks", "options.txt", "logs", "crash-reports" };
+            var isolated = markers.Any(marker => Directory.Exists(Path.Combine(versionPath, marker)) || File.Exists(Path.Combine(versionPath, marker)));
+            var rootMarkers = new[] { "mods", "saves", "resourcepacks", "options.txt" };
+            var rootUsed = rootMarkers.Any(marker => Directory.Exists(Path.Combine(AppPaths.RootDir, marker)) || File.Exists(Path.Combine(AppPaths.RootDir, marker)));
+            return isolated || !rootUsed ? versionPath : AppPaths.RootDir;
+        }
+
+        private static (string McVersion, string Loader, string? LoaderVersion) DetectVersionInfo(string id, string versionDir)
+        {
+            var jsonPath = Path.Combine(versionDir, id + ".json");
+            JsonObject? json = null;
+            try { json = JsonNode.Parse(File.ReadAllText(jsonPath)) as JsonObject; } catch { }
+            var lower = id.ToLowerInvariant();
+            string loader = "vanilla";
+            string? loaderVersion = null;
+            if (lower.Contains("neoforge"))
+            {
+                loader = "neoforge";
+                var index = lower.IndexOf("neoforge", StringComparison.Ordinal);
+                loaderVersion = id[(index + "neoforge".Length)..].TrimStart('-', '_', ' ');
+            }
+            else if (lower.Contains("forge"))
+            {
+                loader = "forge";
+                var index = lower.IndexOf("forge", StringComparison.Ordinal);
+                loaderVersion = id[(index + "forge".Length)..].TrimStart('-', '_', ' ');
+            }
+            else if (lower.StartsWith("fabric-loader-"))
+            {
+                loader = "fabric";
+                var rest = id["fabric-loader-".Length..];
+                var dash = rest.LastIndexOf('-');
+                loaderVersion = dash > 0 ? rest[..dash] : rest;
+                id = dash > 0 ? rest[(dash + 1)..] : id;
+            }
+            else if (lower.StartsWith("quilt-loader-"))
+            {
+                loader = "quilt";
+                var rest = id["quilt-loader-".Length..];
+                var dash = rest.LastIndexOf('-');
+                loaderVersion = dash > 0 ? rest[..dash] : rest;
+                id = dash > 0 ? rest[(dash + 1)..] : id;
+            }
+            else
+            {
+                var mainClass = json?["mainClass"]?.GetValue<string>() ?? "";
+                var librariesText = json?["libraries"]?.ToJsonString() ?? "";
+                if (mainClass.Contains("bootstraplauncher", StringComparison.OrdinalIgnoreCase))
+                    loader = librariesText.Contains("neoforge", StringComparison.OrdinalIgnoreCase) ? "neoforge" : "forge";
+                else if (mainClass.Contains("fabric", StringComparison.OrdinalIgnoreCase)) loader = "fabric";
+                else if (mainClass.Contains("quilt", StringComparison.OrdinalIgnoreCase)) loader = "quilt";
+            }
+            var mcMatch = System.Text.RegularExpressions.Regex.Match(id, @"^(\d+\.\d+(?:\.\d+)?)");
+            var mcVersion = mcMatch.Success ? mcMatch.Groups[1].Value : id;
+            if (json?["inheritsFrom"]?.GetValue<string>() is string parent && parent.Length > 0)
+                mcVersion = parent;
+            return (mcVersion, loader, loaderVersion);
         }
 
         private static string SafeName(string name)

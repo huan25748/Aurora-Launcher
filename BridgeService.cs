@@ -176,7 +176,7 @@ namespace AuroraLauncher
                 : 0;
             return new JsonObject
             {
-                ["version"] = "1.1.0",
+                ["version"] = "1.1.9",
                 ["electron"] = "",
                 ["chrome"] = "",
                 ["node"] = "",
@@ -260,6 +260,7 @@ namespace AuroraLauncher
                     var updated = UpdateSettings(args[0]);
                     var root = updated["rootDir"]?.GetValue<string>();
                     if (!string.IsNullOrWhiteSpace(root)) AppPaths.UseRoot(root!);
+                    try { InstanceArchiveService.ImportExisting(true); } catch { }
                     GameEvents.Emit("settings", updated);
                     NotifyInstances();
                     return updated;
@@ -271,6 +272,7 @@ namespace AuroraLauncher
                     AppPaths.UseRoot(chosen);
                     try { File.WriteAllText(Path.Combine(chosen, ".aurora-root"), ""); } catch { }
                     var updated = UpdateSettings(System.Text.Json.JsonSerializer.SerializeToElement(new { rootDir = chosen }));
+                    try { InstanceArchiveService.ImportExisting(true); } catch { }
                     GameEvents.Emit("settings", updated);
                     NotifyInstances();
                     return updated;
@@ -279,6 +281,7 @@ namespace AuroraLauncher
                 {
                     AppPaths.UseRoot(Path.Combine(AppPaths.BaseDir, ".minecraft"));
                     var updated = UpdateSettings(System.Text.Json.JsonSerializer.SerializeToElement(new { rootDir = AppPaths.RootDir }));
+                    try { InstanceArchiveService.ImportExisting(true); } catch { }
                     GameEvents.Emit("settings", updated);
                     NotifyInstances();
                     return updated;
@@ -415,6 +418,8 @@ namespace AuroraLauncher
                     return await CurseForgeService.InstallPack(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install-folder":
                     return await CurseForgeService.InstallToFolder(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
+                case "news:article":
+                    return await NewsService.Article(ArgString(args, 0));
                 case "news:list":
                     return await NewsService.List(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.True);
                 case "instances:size":

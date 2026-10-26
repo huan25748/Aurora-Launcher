@@ -17,6 +17,15 @@ namespace AuroraLauncher
         {
             base.OnStartup(e);
             _ = Task.Run(ModNamesService.Warm);
+            try
+            {
+                var settings = BridgeService.GetSettings();
+                if (settings["autoImportVersions"]?.GetValue<bool>() != false)
+                {
+                    InstanceArchiveService.ImportExisting(true);
+                }
+            }
+            catch { }
         }
     }
 }

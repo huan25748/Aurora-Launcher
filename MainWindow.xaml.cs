@@ -30,7 +30,9 @@ namespace AuroraLauncher
 
         private void OnClosed(object? sender, EventArgs e)
         {
-            try { LaunchService.Stop(); } catch { }
+            // Do not kill a running game when the launcher window is closed:
+            // Minecraft may still be saving the world. The game keeps running and
+            // exits normally when the player quits it.
             try { ForgeService.StopInstaller(); } catch { }
             try { Browser.Dispose(); } catch { }
         }
