@@ -1,0 +1,15 @@
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.csproj.AssemblyReference.cache
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.GeneratedMSBuildEditorConfig.editorconfig
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.AssemblyInfoInputs.cache
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.AssemblyInfo.cs
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.csproj.CoreCompileInputs.cache
+D:\mc\aurora-launcher(new)\selftest\bin\Release\net6.0-windows\selftest.exe
+D:\mc\aurora-launcher(new)\selftest\bin\Release\net6.0-windows\selftest.deps.json
+D:\mc\aurora-launcher(new)\selftest\bin\Release\net6.0-windows\selftest.runtimeconfig.json
+D:\mc\aurora-launcher(new)\selftest\bin\Release\net6.0-windows\selftest.dll
+D:\mc\aurora-launcher(new)\selftest\bin\Release\net6.0-windows\selftest.pdb
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.dll
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\refint\selftest.dll
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.pdb
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\selftest.genruntimeconfig.cache
+D:\mc\aurora-launcher(new)\selftest\obj\Release\net6.0-windows\ref\selftest.dll

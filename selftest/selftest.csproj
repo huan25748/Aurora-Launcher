@@ -31,6 +31,8 @@
     <Compile Include="..\NewsService.cs" Link="NewsService.cs" />
     <Compile Include="..\ServerStoreService.cs" Link="ServerStoreService.cs" />
     <Compile Include="..\InstanceArchiveService.cs" Link="InstanceArchiveService.cs" />
+    <Compile Include="..\LocalModpackService.cs" Link="LocalModpackService.cs" />
+    <Compile Include="..\VersionCleanup.cs" Link="VersionCleanup.cs" />
   </ItemGroup>
 </Project>
 
