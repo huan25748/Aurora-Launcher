@@ -246,42 +246,11 @@
       clearConsole: noop
     },
     news: {
+      article: async (url) => { try { return await invoke('news:article', url) } catch { return '' } },
       list: async (force) => {
         let items
         try { items = await invoke('news:list', force === true) } catch { items = [] }
-        if (!Array.isArray(items)) items = []
-        try {
-          const manifest = await invoke('versions:manifest')
-          const release = manifest?.latest?.release
-          const snapshot = manifest?.latest?.snapshot
-          const wanted = []
-          if (release && !items.some((item) => String(item?.id ?? '').includes('wiki-release-' + release))) wanted.push({ version: release, id: 'wiki-release-' + release, tag: '最新版本', label: '版本介绍', pinned: true })
-          if (snapshot && snapshot !== release && !items.some((item) => String(item?.id ?? '').includes('wiki-preview-' + snapshot))) wanted.push({ version: snapshot, id: 'wiki-preview-' + snapshot, tag: '最新预览', label: '预览版介绍', pinned: false })
-          const added = []
-          for (const entry of wanted) {
-            const title = 'Java版' + entry.version
-            const api = 'https://zh.minecraft.wiki/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&format=json&origin=*&titles=' + encodeURIComponent(title)
-            const response = await fetch(api, { headers: { Accept: 'application/json' } })
-            if (!response.ok) continue
-            const data = await response.json()
-            const pages = data?.query?.pages ?? {}
-            const page = Object.values(pages)[0]
-            let text = String(page?.extract ?? '').replace(/\s+/g, ' ').trim()
-            if (!text) continue
-            if (text.length > 240) text = text.slice(0, 240) + '…'
-            added.push({
-              id: entry.id,
-              title: 'Minecraft ' + entry.version + ' ' + entry.label,
-              summary: text,
-              url: 'https://zh.minecraft.wiki/w/' + encodeURIComponent(title),
-              tag: entry.tag,
-              image: null,
-              pinned: entry.pinned
-            })
-          }
-          if (added.length) items = [...added, ...items]
-        } catch {}
-        return items
+        return Array.isArray(items) ? items : []
       }
     },
     events: {
