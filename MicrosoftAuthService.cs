@@ -168,11 +168,20 @@ namespace AuroraLauncher
                 ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 ["lastUsedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
+            var avatar = await AvatarService.Fetch(uuid);
+            if (avatar != null)
+            {
+                account["avatarUrl"] = avatar;
+                account["avatarMode"] = "head3d";
+                account["avatarVersion"] = 4;
+            }
             AccountService.AddMicrosoft(account);
+            // AddMicrosoft attaches the object to the account store; returning the
+            // same JsonNode in another JsonObject throws "The node already has a parent".
             return new JsonObject
             {
                 ["status"] = "success",
-                ["account"] = account
+                ["account"] = JsonNode.Parse(account.ToJsonString())
             };
         }
 

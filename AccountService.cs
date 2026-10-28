@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -52,6 +53,29 @@ namespace AuroraLauncher
             foreach (var item in accounts)
                 if (item?["id"]?.GetValue<string>() == activeId) return item;
             return accounts.Count > 0 ? accounts[0] : null;
+        }
+
+        public static JsonObject? Find(string id)
+        {
+            var store = Load();
+            if (store["accounts"] is not JsonArray accounts) return null;
+            return accounts.OfType<JsonObject>().FirstOrDefault(item => item["id"]?.GetValue<string>() == id);
+        }
+
+        public static void Update(string id, Action<JsonObject> action)
+        {
+            var store = Load();
+            if (store["accounts"] is JsonArray accounts)
+            {
+                foreach (var item in accounts.OfType<JsonObject>())
+                {
+                    if (item["id"]?.GetValue<string>() != id) continue;
+                    action(item);
+                    break;
+                }
+            }
+            Save(store);
+            GameEvents.Emit("accounts", List());
         }
 
         public static JsonNode? SetActive(string id)

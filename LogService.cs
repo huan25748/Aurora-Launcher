@@ -106,22 +106,36 @@ namespace AuroraLauncher
             }
         }
 
-        public static JsonObject Analyze(string instanceId)
+        public static JsonObject? Analyze(string instanceId)
         {
             instanceId = Resolve(instanceId);
             var file = Path.Combine(LogsDir(instanceId), "latest.log");
+            if (!File.Exists(file)) return null;
+            var instance = BridgeService.GetInstance(instanceId) as JsonObject;
+            // Never show another instance's crash on an instance that was never
+            // launched (many portable instances share one .minecraft folder).
+            if ((instance?["playCount"]?.GetValue<int>() ?? 0) <= 0 && instance?["lastPlayedAt"] == null) return null;
+            try
+            {
+                var lastPlayed = instance?["lastPlayedAt"]?.GetValue<long>() ?? 0;
+                // A shared .minecraft/logs/latest.log must not make an instance
+                // that was last played long ago show a newer instance's crash.
+                if (lastPlayed > 0 && File.GetLastWriteTimeUtc(file) < DateTimeOffset.FromUnixTimeMilliseconds(lastPlayed).UtcDateTime.AddHours(-2))
+                    return null;
+            }
+            catch { }
             var evidence = new JsonArray();
             var suggestions = new JsonArray();
             var mods = new JsonArray();
             var cause = "未发现明显崩溃";
             var confidence = "low";
             var summary = "日志没有匹配到明确的崩溃特征。";
-            if (File.Exists(file))
             {
                 var text = "";
                 try { text = Decode(File.ReadAllBytes(file)); } catch { }
                 void Hit(string needle, string name, string hint, string level = "high")
                 {
+                    if (confidence == "high") return;
                     if (!text.Contains(needle, StringComparison.OrdinalIgnoreCase)) return;
                     cause = name; confidence = level; summary = name + "。";
                     evidence.Add(needle);
@@ -129,7 +143,38 @@ namespace AuroraLauncher
                 }
                 Hit("OutOfMemoryError", "内存不足", "调高实例内存分配，或减少同时加载的模组。");
                 Hit("UnsupportedClassVersionError", "Java 版本不匹配", "把实例 Java 切换到该 Minecraft 版本要求的版本。");
-                Hit("Mixin", "Mixin 注入失败", "检查最近安装的模组是否与该游戏版本/加载器兼容。", "medium");
+                if (text.Contains("Mixin apply failed", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("MixinTransformerError", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("MixinBootstrap", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("org.spongepowered.asm.mixin", StringComparison.OrdinalIgnoreCase))
+                {
+                    cause = "Mixin 注入失败";
+                    confidence = "medium";
+                    summary = "Mixin 注入失败。";
+                    suggestions.Add("检查最近安装的模组是否与该游戏版本/加载器兼容。");
+                    evidence.Add("Mixin apply failed");
+                }
+                if (text.Contains("MinecraftClientHttpException", StringComparison.OrdinalIgnoreCase)
+                    && text.Contains("401", StringComparison.OrdinalIgnoreCase))
+                {
+                    cause = "登录验证失败";
+                    confidence = "high";
+                    summary = "Minecraft 登录令牌验证失败（HTTP 401），不是模组或 Mixin 问题。";
+                    suggestions.Clear();
+                    suggestions.Add("在账户页面重新登录 Microsoft 账户。");
+                    suggestions.Add("检查系统时间是否准确，然后重启启动器。");
+                    evidence.Add("MinecraftClientHttpException: Status: 401");
+                }
+                else if (text.Contains("VarHandler is null", StringComparison.OrdinalIgnoreCase))
+                {
+                    cause = "Forge / ModLauncher 启动失败";
+                    confidence = "medium";
+                    summary = "Forge 的 ModLauncher 没有完成初始化，常见于 Java 版本不匹配或 Forge 安装文件不完整。";
+                    suggestions.Clear();
+                    suggestions.Add("确认该 Minecraft 版本使用的 Java 正确，必要时切换到 Java 8 或 Java 17。");
+                    suggestions.Add("重新安装对应 Forge / NeoForge 版本。");
+                    evidence.Add("java.lang.RuntimeException: VarHandler is null");
+                }
                 Hit("NoSuchMethodError", "模组 API 不兼容", "检查模组之间的版本依赖。");
                 Hit("NoClassDefFoundError", "缺少依赖模组", "补齐前置模组或重新安装整合包。");
                 Hit("Exception in thread", "游戏或模组抛出异常", "查看日志中第一段 Caused by 堆栈。", "medium");
@@ -159,7 +204,7 @@ namespace AuroraLauncher
                     evidence.Add("java/lang/NoClassDefFoundError: java/lang/Object");
                 }
 
-                if (text.Contains("Caused by:", StringComparison.OrdinalIgnoreCase))
+                if (cause != "未发现明显崩溃" && text.Contains("Caused by:", StringComparison.OrdinalIgnoreCase))
                 {
                     foreach (var line in text.Split('\n'))
                     {
@@ -169,6 +214,7 @@ namespace AuroraLauncher
                     }
                 }
             }
+            if (evidence.Count == 0) return null;
             return new JsonObject
             {
                 ["cause"] = cause,

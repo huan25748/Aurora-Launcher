@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 
 namespace AuroraLauncher
 {
@@ -164,19 +165,25 @@ namespace AuroraLauncher
 
         public static JsonObject AppInfo()
         {
-            var instances = ListInstances();
+            JsonArray instances;
+            try { instances = ListInstances(); }
+            catch { instances = new JsonArray(); }
             long playTime = 0;
             foreach (var item in instances)
             {
                 try { playTime += item?["totalPlayTimeMs"]?.GetValue<long>() ?? 0; } catch { }
             }
             var versionsDir = Path.Combine(AppPaths.RootDir, "versions");
-            var totalVersions = Directory.Exists(versionsDir)
-                ? Directory.GetDirectories(versionsDir).Length
-                : 0;
+            var totalVersions = 0;
+            try
+            {
+                if (Directory.Exists(versionsDir))
+                    totalVersions = Directory.GetDirectories(versionsDir).Length;
+            }
+            catch { }
             return new JsonObject
             {
-                ["version"] = "1.1.9",
+                ["version"] = typeof(BridgeService).Assembly.GetName().Version?.ToString(3) ?? "1.2.25",
                 ["electron"] = "",
                 ["chrome"] = "",
                 ["node"] = "",
@@ -241,6 +248,8 @@ namespace AuroraLauncher
                     return SystemService.PickFile(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default, args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 1 && args[1].ValueKind == JsonValueKind.True);
                 case "updates:check":
                     return await UpdateService.Check(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.True);
+                case "updates:download":
+                    return await UpdateService.DownloadAndApply(ArgString(args, 0), ArgString(args, 1));
                 case "modnames:translate":
                 {
                     var queries = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
@@ -418,6 +427,34 @@ namespace AuroraLauncher
                     return await CurseForgeService.InstallPack(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install-folder":
                     return await CurseForgeService.InstallToFolder(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
+                case "easytier:status":
+                    return EasyTierService.Status();
+                case "easytier:lan-scan":
+                    return LanScanService.Scan();
+                case "easytier:firewall":
+                    return FirewallService.Allow();
+                case "easytier:create-invite":
+                    return EasyTierService.CreateInvite(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
+                        ? JsonNode.Parse(args[0].GetRawText()) as JsonObject ?? new JsonObject()
+                        : new JsonObject());
+                case "easytier:join-invite":
+                    return await EasyTierService.JoinInvite(ArgString(args, 0));
+                case "easytier:latency":
+                    return await EasyTierService.Latency(ArgString(args, 0));
+                case "easytier:install":
+                    return await EasyTierService.Ensure(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.True, CancellationToken.None);
+                case "easytier:start":
+                    return await EasyTierService.Start(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
+                        ? JsonNode.Parse(args[0].GetRawText()) as JsonObject ?? new JsonObject()
+                        : new JsonObject());
+                case "easytier:stop":
+                    return EasyTierService.Stop();
+                case "easytier:peers":
+                    return await EasyTierService.Peers();
+                case "easytier:save":
+                    return EasyTierService.Save(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
+                        ? JsonNode.Parse(args[0].GetRawText()) as JsonObject ?? new JsonObject()
+                        : new JsonObject());
                 case "news:article":
                     return await NewsService.Article(ArgString(args, 0));
                 case "news:list":
@@ -472,6 +509,8 @@ namespace AuroraLauncher
                         ? await LoaderService.List(kind, mc)
                         : await ForgeService.List(kind, mc);
                 }
+                case "fabricapi:versions":
+                    return await FabricApiService.Versions(ArgString(args, 0));
                 case "install:loader":
                 {
                     var request = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
@@ -490,7 +529,8 @@ namespace AuroraLauncher
                             request["mcVersion"]?.GetValue<string>() ?? "",
                             request["loaderVersion"]?.GetValue<string>(),
                             request["instanceName"]?.GetValue<string>(),
-                            request["createInstance"]?.GetValue<bool>() ?? true);
+                            request["createInstance"]?.GetValue<bool>() ?? true,
+                            request["fabricApiVersion"]?.GetValue<string>());
                     if (kind == "forge" || kind == "neoforge")
                         return await ForgeService.Install(
                             kind,
@@ -535,6 +575,7 @@ namespace AuroraLauncher
                     ContentService.DeleteWorld(ArgString(args, 0), ArgString(args, 1));
                     return null;
                 case "accounts:list":
+                    await AccountAvatarService.RefreshAll();
                     return AccountService.List();
                 case "accounts:active":
                     return AccountService.Active();
@@ -561,6 +602,39 @@ namespace AuroraLauncher
                     if (account["type"]?.GetValue<string>() == "microsoft") return await MicrosoftAuthService.Refresh(account);
                     return account;
                 }
+                case "accounts:skin":
+                {
+                    var request = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
+                        ? JsonNode.Parse(args[0].GetRawText()) as JsonObject
+                        : null;
+                    if (request == null) return null;
+                    return await AccountSkinService.Apply(
+                        request["accountId"]?.GetValue<string>() ?? "",
+                        request["mode"]?.GetValue<string>() ?? "",
+                        request["variant"]?.GetValue<string>() ?? "classic",
+                        request["data"]?.GetValue<string>(),
+                        request["playerName"]?.GetValue<string>() ?? "");
+                }
+                case "accounts:authlib-profiles":
+                    return await AuthlibService.Profiles(ArgString(args, 0));
+                case "accounts:authlib-switch":
+                    return await AuthlibService.SwitchProfile(ArgString(args, 0), ArgString(args, 1));
+                case "accounts:upload-skin":
+                {
+                    var request = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
+                        ? JsonNode.Parse(args[0].GetRawText()) as JsonObject
+                        : null;
+                    if (request == null) return null;
+                    return await AccountSkinService.UploadMicrosoft(
+                        request["accountId"]?.GetValue<string>() ?? "",
+                        request["variant"]?.GetValue<string>() ?? "classic",
+                        request["data"]?.GetValue<string>());
+                }
+                case "accounts:capes":
+                    return await AccountSkinService.GetCapes(ArgString(args, 0));
+                case "accounts:set-cape":
+                    await AccountSkinService.SetCape(ArgString(args, 0), ArgString(args, 1));
+                    return null;
                 case "accounts:remove":
                     if (args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0)
                         AccountService.Remove(args[0].GetString() ?? "");

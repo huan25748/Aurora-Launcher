@@ -39,6 +39,11 @@ namespace AuroraLauncher
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
+            if (App.BlockedByExistingInstance)
+            {
+                Close();
+                return;
+            }
             try
             {
                 AppPaths.EnsureLayout();
@@ -79,7 +84,7 @@ namespace AuroraLauncher
 
                 var boot = new
                 {
-                    version = "1.1.0",
+                    version = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "1.2.0",
                     baseDir = AppPaths.BaseDir,
                     rootDir = AppPaths.RootDir,
                     settingsDir = AppPaths.SettingsDir,

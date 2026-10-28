@@ -11,6 +11,20 @@ namespace AuroraLauncher
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         private static string JarPath => Path.Combine(AppPaths.RootDir, "libraries", "authlib-injector", "authlib-injector.jar");
 
+        public static async Task<string?> Prefetched(string server)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, server);
+                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
+                using var response = await Http.SendAsync(request);
+                if (!response.IsSuccessStatusCode) return null;
+                var text = await response.Content.ReadAsStringAsync();
+                return string.IsNullOrWhiteSpace(text) ? null : Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(text));
+            }
+            catch { return null; }
+        }
+
         public static async Task<string> Ensure()
         {
             if (File.Exists(JarPath)) return JarPath;

@@ -1,6 +1,8 @@
 # Aurora Launcher
 
-Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器，当前版本 **1.1.8**。
+Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
+
+本文档以 **1.2.26** 为基线，介绍启动器当前已经具备的功能；后续版本的新功能会逐步补充到 README 中。
 
 项目前身是 Electron 版 Aurora Launcher 1.0.78；本仓库是使用 **.NET 6 + WPF + WebView2** 重写的当前版本。
 
@@ -8,6 +10,7 @@ Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器，当前版本 *
 
 ## 下载
 
+- Gitee Releases：<https://gitee.com/mobai-33460/aurora-launcher/releases>
 - 蓝奏云：<https://mobaijianhe.lanzouc.com/b01euviyte>
 - 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
@@ -64,6 +67,21 @@ Minecraft 1.20.5+   至少 Java 21
 ```
 
 离线账户与 Microsoft 账户按照 PCL 的语义分别使用自己的 UUID。启动器不会自动把正版存档复制给离线账户，也不会改写世界里的 FTB Teams 数据。
+
+### 联机
+
+- 基于 EasyTier 的 P2P 虚拟局域网。
+- 内置公共服务器：
+
+```text
+tcp://public.easytier.top:11010
+udp://public.easytier.top:11010
+```
+
+- 公共服务器延迟检测。
+- 支持自定义 EasyTier 服务器地址。
+- 支持创建房间、设置网络名称与密码。
+- 显示节点信息，便于朋友通过虚拟 IP 连接 Minecraft 局域网世界。
 
 ### 实例
 
@@ -166,7 +184,7 @@ log4j / ModLauncher 签名不匹配
 
 ### 其他
 
-- 更新检查：读取 GitHub Releases。
+- 更新检查：读取 Gitee Releases，支持直接下载并重启。
 - 存储占用统计。
 - 缓存与安装器残留清理。
 - 未使用依赖库与资源精简。
@@ -290,18 +308,31 @@ PCL2 新闻主页 API 与版本更新日志数据。
 
 - https://mymemory.translated.net/
 
-### Crafatar / MC-Heads
+### EasyTier
 
-提供玩家头像渲染与皮肤预览。
+提供 P2P 虚拟局域网与联机底层。
 
-- https://crafatar.com/
-- https://mc-heads.net/
+- https://github.com/EasyTier/EasyTier
+- https://easytier.rs/
 
 ### PCL / PCL-CE
 
 Plain Craft Launcher 项目作为 Java 选择、账户语义、安装与启动行为的参考。
 
 感谢以上项目与服务的作者和贡献者。
+
+---
+
+## 许可证
+
+本项目使用 **GNU Lesser General Public License v3.0 only**（LGPL-3.0-only）授权。
+
+完整许可证文本见：[LICENSE](LICENSE)
+
+LGPL-3.0 包含 GNU GPL v3.0 的条款：
+
+- <https://www.gnu.org/licenses/lgpl-3.0.txt>
+- <https://www.gnu.org/licenses/gpl-3.0.txt>
 
 ---
 

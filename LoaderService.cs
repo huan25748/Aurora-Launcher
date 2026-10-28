@@ -49,7 +49,7 @@ namespace AuroraLauncher
             return result;
         }
 
-        public static async Task<JsonObject> Install(string kind, string mcVersion, string? loaderVersion, string? instanceName, bool createInstance, CancellationToken token = default)
+        public static async Task<JsonObject> Install(string kind, string mcVersion, string? loaderVersion, string? instanceName, bool createInstance, string? fabricApiVersion = null, CancellationToken token = default)
         {
             ProgressService.Begin($"安装 {kind} {loaderVersion ?? ""} ({mcVersion})");
             var cleanupBefore = VersionCleanup.Snapshot();
@@ -154,6 +154,10 @@ namespace AuroraLauncher
             string? instanceId = null;
             if (createInstance)
                 instanceId = MinecraftInstallService.CreateInstance(profileId, instanceName ?? profileId, kind, version, mcVersion, cleanupBefore);
+            if (kind == "fabric" && createInstance && !string.IsNullOrWhiteSpace(fabricApiVersion) && !string.IsNullOrWhiteSpace(instanceId))
+            {
+                await FabricApiService.Install(mcVersion, fabricApiVersion, instanceId, token);
+            }
             ProgressService.Complete();
             return new JsonObject { ["instanceId"] = instanceId, ["versionId"] = profileId };
         }

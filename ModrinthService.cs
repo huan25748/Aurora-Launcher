@@ -101,6 +101,7 @@ namespace AuroraLauncher
             var raw = await Get("/project/" + Uri.EscapeDataString(id)) as JsonObject ?? throw new Exception("项目不存在");
             if (raw["project_id"] == null) raw["project_id"] = raw["id"]?.GetValue<string>() ?? id;
             if (raw["follows"] == null && raw["followers"] != null) raw["follows"] = raw["followers"]!.DeepCloneCompat();
+            raw["descriptionTranslation"] = await TranslationService.Translate(raw["description"]?.GetValue<string>());
             return raw;
         }
 
@@ -141,8 +142,15 @@ namespace AuroraLauncher
             Directory.CreateDirectory(dir);
             var fileName = file["filename"]?.GetValue<string>() ?? "download.jar";
             var target = Path.Combine(dir, fileName);
-            ProgressService.Step("下载模组文件", 1, fileName);
-            await Download(file, target);
+            var downloadStep = ProgressService.Step("下载模组文件", 1, fileName);
+            await Download(file, target, (received, total) =>
+            {
+                if (total > 0) ProgressService.TotalAt(downloadStep, total);
+                ProgressService.ProgressAt(downloadStep, received,
+                    $"{MinecraftInstallService.FormatBytes(received)}" + (total > 0 ? $" / {MinecraftInstallService.FormatBytes(total)}" : ""));
+            });
+            ProgressService.TotalAt(downloadStep, 1);
+            ProgressService.UpdateAt(downloadStep, 1, "下载完成");
             ProgressService.Update(1, fileName);
             ProgressService.Complete();
             return new JsonObject { ["path"] = target, ["filename"] = fileName };
@@ -161,8 +169,15 @@ namespace AuroraLauncher
             Directory.CreateDirectory(destDir);
             var fileName = file["filename"]?.GetValue<string>() ?? "download.jar";
             var target = Path.Combine(destDir, fileName);
-            ProgressService.Step("下载文件", 1, fileName);
-            await Download(file, target);
+            var downloadStep = ProgressService.Step("下载文件", 1, fileName);
+            await Download(file, target, (received, total) =>
+            {
+                if (total > 0) ProgressService.TotalAt(downloadStep, total);
+                ProgressService.ProgressAt(downloadStep, received,
+                    $"{MinecraftInstallService.FormatBytes(received)}" + (total > 0 ? $" / {MinecraftInstallService.FormatBytes(total)}" : ""));
+            });
+            ProgressService.TotalAt(downloadStep, 1);
+            ProgressService.UpdateAt(downloadStep, 1, "下载完成");
             ProgressService.Update(1, fileName);
             ProgressService.Complete();
             return new JsonObject { ["installed"] = new JsonArray(fileName) };
@@ -170,18 +185,35 @@ namespace AuroraLauncher
 
         public static async Task<JsonObject> InstallPack(string projectId, string? instanceName, string? versionId)
         {
-            ProgressService.Begin("安装 Modrinth 整合包");
+            var packTitle = "安装整合包";
+            try
+            {
+                var project = await Project(projectId);
+                if (project["title"]?.GetValue<string>() is string projectName && projectName.Length > 0)
+                    packTitle += " · " + projectName;
+            }
+            catch { }
+            if (string.IsNullOrWhiteSpace(instanceName) && packTitle.StartsWith("安装整合包 · ", StringComparison.Ordinal))
+                instanceName = packTitle["安装整合包 · ".Length..];
+            ProgressService.BeginPack(packTitle);
             var versions = await Versions(projectId, null, null);
             JsonObject? version = null;
             foreach (var item in versions)
                 if (item is JsonObject candidate && (string.IsNullOrWhiteSpace(versionId) || candidate["id"]?.GetValue<string>() == versionId)) { version = candidate; break; }
             version ??= versions.OfType<JsonObject>().FirstOrDefault() ?? throw new Exception("整合包没有可用版本");
             var file = PrimaryFile(version) ?? throw new Exception("整合包版本没有文件");
-            ProgressService.Step("下载整合包", 1, file["filename"]?.GetValue<string>() ?? "");
+            var packStep = ProgressService.Step("下载整合包", 1, file["filename"]?.GetValue<string>() ?? "");
+            if ((file["size"]?.GetValue<long>() ?? 0) > 0) ProgressService.TotalAt(packStep, file["size"]!.GetValue<long>());
             var zipPath = Path.Combine(AppPaths.SettingsDir, "cache", "packs", file["filename"]?.GetValue<string>() ?? projectId + ".mrpack");
             Directory.CreateDirectory(Path.GetDirectoryName(zipPath)!);
-            await Download(file, zipPath);
-            ProgressService.Update(1, "整合包已下载");
+            await Download(file, zipPath, (received, total) =>
+            {
+                if (total > 0) ProgressService.TotalAt(packStep, total);
+                ProgressService.ProgressAt(packStep, received,
+                    $"{MinecraftInstallService.FormatBytes(received)}" + (total > 0 ? $" / {MinecraftInstallService.FormatBytes(total)}" : ""));
+            });
+            ProgressService.TotalAt(packStep, 1);
+            ProgressService.UpdateAt(packStep, 1, "整合包已下载");
             var temp = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "mr-" + Guid.NewGuid().ToString("N")[..8]);
             Directory.CreateDirectory(temp);
             System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, temp, true);
@@ -193,6 +225,7 @@ namespace AuroraLauncher
             var quiltLoader = index["dependencies"]?["quilt-loader"]?.GetValue<string>();
             var forge = index["dependencies"]?["forge"]?.GetValue<string>();
             var neoforge = index["dependencies"]?["neoforge"]?.GetValue<string>();
+            var baseStep = ProgressService.Step("安装游戏基础", 1, $"{mcVersion} {(fabricLoader != null ? "fabric" : forge != null ? "forge" : neoforge != null ? "neoforge" : quiltLoader != null ? "quilt" : "vanilla")}");
             string instanceId;
             if (!string.IsNullOrWhiteSpace(fabricLoader) || !string.IsNullOrWhiteSpace(quiltLoader))
             {
@@ -214,33 +247,49 @@ namespace AuroraLauncher
                 instanceId = result["instanceId"]?.GetValue<string>() ?? throw new Exception("创建整合包实例失败");
             }
             var instance = BridgeService.GetInstance(instanceId) as JsonObject ?? throw new Exception("实例不存在");
+            ProgressService.UpdateAt(baseStep, 1, "安装完成");
             var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", instance["versionId"]?.GetValue<string>() ?? "");
             if (index["files"] is JsonArray files)
             {
-                ProgressService.Step("下载整合包文件", files.Count, files.Count + " 个文件");
+                var downloadStep = ProgressService.Step("下载整合包文件", files.Count, files.Count + " 个文件");
+                var doneCount = 0;
                 using var gate = new System.Threading.SemaphoreSlim(8);
                 await Task.WhenAll(files.OfType<JsonObject>().Select(async entry =>
                 {
                     var path = entry["path"]?.GetValue<string>() ?? "";
-                    var downloads = entry["downloads"] as JsonArray;
-                    var url = downloads?.OfType<JsonNode>().Select(item => item.GetValue<string>()).FirstOrDefault();
-                    if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(url)) return;
+                    var downloads = (entry["downloads"] as JsonArray)?.OfType<JsonNode>()
+                        .Select(item => item.GetValue<string>())
+                        .Where(item => !string.IsNullOrWhiteSpace(item))
+                        .ToList() ?? new List<string>();
+                    if (string.IsNullOrWhiteSpace(path) || downloads.Count == 0) return;
                     try
                     {
                         await gate.WaitAsync();
                         var target = Path.GetFullPath(Path.Combine(gameDir, path));
                         if (!target.StartsWith(Path.GetFullPath(gameDir), StringComparison.OrdinalIgnoreCase)) return;
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                        await DownloadService.Download(url!, target);
+                        Exception? last = null;
+                        foreach (var url in downloads)
+                        {
+                            try { await DownloadService.Download(url, target); last = null; break; }
+                            catch (Exception ex) { last = ex; }
+                        }
+                        if (last != null) throw last;
                     }
                     catch { }
-                    finally { gate.Release(); }
+                    finally
+                    {
+                        gate.Release();
+                        var done = System.Threading.Interlocked.Increment(ref doneCount);
+                        ProgressService.ProgressAt(downloadStep, done, $"{done}/{(index["files"] as JsonArray)?.Count ?? 0}");
+                    }
                 }));
-            ProgressService.Update((index["files"] as JsonArray)?.Count ?? 0, "整合包文件已下载");
+                ProgressService.UpdateAt(downloadStep, (index["files"] as JsonArray)?.Count ?? 0, "整合包文件已下载");
             }
-            var overrides = Path.Combine(temp, "overrides");
-            if (Directory.Exists(overrides))
+            foreach (var folder in new[] { "overrides", "client-overrides" })
             {
+                var overrides = Path.Combine(temp, folder);
+                if (!Directory.Exists(overrides)) continue;
                 foreach (var source in Directory.EnumerateFiles(overrides, "*", SearchOption.AllDirectories))
                 {
                     var relative = Path.GetRelativePath(overrides, source);
@@ -251,7 +300,7 @@ namespace AuroraLauncher
             }
             try { Directory.Delete(temp, true); } catch { }
             try { File.Delete(zipPath); } catch { }
-            ProgressService.Complete();
+            ProgressService.CompletePack();
             return new JsonObject { ["instanceId"] = instanceId };
         }
 
@@ -278,12 +327,12 @@ namespace AuroraLauncher
                 ?? files.OfType<JsonObject>().FirstOrDefault();
         }
 
-        private static async Task Download(JsonObject file, string target)
+        private static async Task Download(JsonObject file, string target, Action<long, long>? progress = null)
         {
             var url = file["url"]?.GetValue<string>() ?? throw new Exception("下载地址为空");
             var sha1 = file["hashes"]?["sha1"]?.GetValue<string>();
             var size = file["size"]?.GetValue<long>() ?? 0;
-            await DownloadService.Download(url, target, sha1, size);
+            await DownloadService.Download(url, target, sha1, size, default, progress);
         }
 
         private static string GetString(JsonElement input, string name)

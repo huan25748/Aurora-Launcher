@@ -52,8 +52,68 @@ namespace AuroraLauncher
                 ["memoryMB"] = (long)total,
                 ["totalMemoryMB"] = (long)total,
                 ["availableMemoryMB"] = (long)available,
-                ["suggestedMemory"] = Math.Max(1024, Math.Min(8192, (int)(total / 4)))
+                ["suggestedMemory"] = AutoMemoryMB("", 0, false)
             };
+        }
+
+        // PCL auto-memory: allocate in four stages instead of a fixed 1/4 of
+        // physical memory. Targets grow with the number of installed mods.
+        public static int AutoMemoryMB(string gameDir, int? modCount = null, bool optifine = false)
+        {
+            var status = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+            double availableGb = 8;
+            if (GlobalMemoryStatusEx(ref status) && status.ullAvailPhys > 0)
+                availableGb = status.ullAvailPhys / 1024d / 1024d / 1024d;
+            availableGb = Math.Round(availableGb * 10) / 10;
+            var mods = modCount ?? 0;
+            if (modCount == null && !string.IsNullOrWhiteSpace(gameDir))
+            {
+                try
+                {
+                    var dir = Path.Combine(gameDir, "mods");
+                    if (Directory.Exists(dir)) mods = Directory.GetFiles(dir).Length;
+                }
+                catch { }
+            }
+            double min, t1, t2, t3;
+            if (optifine)
+            {
+                min = 0.5d; t1 = 1.5d; t2 = 3d; t3 = 5d;
+            }
+            else if (mods > 0)
+            {
+                min = 0.5d + mods / 150d;
+                t1 = 1.5d + mods / 90d;
+                t2 = 2.7d + mods / 50d;
+                t3 = 4.5d + mods / 25d;
+            }
+            else
+            {
+                min = 0.5d; t1 = 1.5d; t2 = 2.5d; t3 = 4d;
+            }
+            var available = availableGb;
+            var give = 0d;
+            var delta = t1;
+            give += Math.Min(available, delta);
+            available -= delta;
+            if (available >= 0.1d)
+            {
+                delta = t2 - t1;
+                give += Math.Min(available * 0.7d, delta);
+                available -= delta / 0.7d;
+                if (available >= 0.1d)
+                {
+                    delta = t3 - t2;
+                    give += Math.Min(available * 0.4d, delta);
+                    available -= delta / 0.4d;
+                    if (available >= 0.1d)
+                    {
+                        give += Math.Min(available * 0.15d, t3);
+                    }
+                }
+            }
+            give = Math.Round(Math.Max(give, min), 1);
+            return Math.Max(1024, (int)(give * 1024));
         }
 
         public static JsonObject StorageStats()

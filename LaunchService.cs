@@ -313,8 +313,18 @@ namespace AuroraLauncher
                 ProgressService.Step("检查资源文件", 1, assetsIndex);
                 await MinecraftInstallService.EnsureAssets(version);
                 ProgressService.Update(1, "资源文件已就绪");
+                {
+                    var skinStep = ProgressService.Step("皮肤与披风", 1, "检查客户端补丁");
+                    await TransparentCapesPatchService.Ensure(instance, versionId, account,
+                        System.Threading.CancellationToken.None);
+                    ProgressService.UpdateAt(skinStep, 1, "已就绪");
+                }
                 var memory = instance["memory"]?.GetValue<int>() ?? (settings["defaultMemory"]?.GetValue<int>() ?? 0);
-                if (memory <= 0) memory = 4096;
+                if (memory <= 0)
+                {
+                    var loader = instance["loader"]?.GetValue<string>() ?? "vanilla";
+                    memory = SystemService.AutoMemoryMB(gameDir, null, loader == "optifine");
+                }
 
                 var releaseTime = version["releaseTime"]?.GetValue<string>() ?? "";
                 var features = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
@@ -346,7 +356,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "1.1.9",
+                    ["${launcher_version}"] = "1.3.3",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -378,9 +388,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=1.1.9");
-                AddJvm("-Dsun.stdout.encoding", "-Dsun.stdout.encoding=UTF-8");
-                AddJvm("-Dsun.stderr.encoding", "-Dsun.stderr.encoding=UTF-8");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=1.3.3");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
@@ -406,14 +414,24 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=1.1.9");
+                args.Add("-Dminecraft.launcher.version=1.3.3");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
                 {
                     var injector = await AuthlibInjectorService.Ensure();
-                    args.Add("-javaagent:" + injector + "=" + account["authServer"]!.GetValue<string>());
+                    var authServer = account["authServer"]!.GetValue<string>().Trim().TrimEnd('/');
+                    if (authServer.EndsWith("/authserver", StringComparison.OrdinalIgnoreCase))
+                        authServer = authServer[..^"/authserver".Length].TrimEnd('/');
+                    if (authServer.Contains("littleskin.cn", StringComparison.OrdinalIgnoreCase)
+                        && !authServer.Contains("/api/yggdrasil", StringComparison.OrdinalIgnoreCase))
+                        authServer += "/api/yggdrasil";
+                    var prefetched = await AuthlibInjectorService.Prefetched(authServer);
+                    args.Add("-javaagent:" + injector + "=" + authServer);
                     args.Add("-Dauthlibinjector.side=client");
+                    if (prefetched != null) args.Add("-Dauthlibinjector.yggdrasil.prefetched=" + prefetched);
+                    // LittleSkin and most Yggdrasil services use the Windows root store.
+                    args.Add("-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT");
                 }
 
                 var mainClass = version["mainClass"]?.GetValue<string>() ?? throw new Exception("版本缺少 mainClass");
@@ -457,7 +475,9 @@ namespace AuroraLauncher
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding = System.Text.Encoding.UTF8
                 };
                 foreach (var arg in args) startInfo.ArgumentList.Add(arg);
 
@@ -825,17 +845,36 @@ namespace AuroraLauncher
             catch { return null; }
         }
 
+        private static void RepairLegacyForgeArguments(JsonObject version)
+        {
+            if (!string.Equals(version["mainClass"]?.GetValue<string>(), "net.minecraft.launchwrapper.Launch", StringComparison.Ordinal)
+                || version["minecraftArguments"] is not JsonValue launchArgs
+                || !launchArgs.TryGetValue<string>(out var args)
+                || args.Contains("--tweakClass", StringComparison.OrdinalIgnoreCase))
+                return;
+            version["minecraftArguments"] = args + " --tweakClass cpw.mods.fml.common.launcher.FMLTweaker";
+        }
+
         internal static JsonObject LoadVersionChain(string versionId)
         {
             var file = Path.Combine(AppPaths.RootDir, "versions", versionId, versionId + ".json");
             if (!File.Exists(file)) throw new Exception("版本文件不存在：" + versionId);
             var child = JsonNode.Parse(File.ReadAllText(file)) as JsonObject ?? throw new Exception("版本 JSON 格式不正确");
             var parentId = child["inheritsFrom"]?.GetValue<string>();
-            if (string.IsNullOrWhiteSpace(parentId)) return child;
+            if (string.IsNullOrWhiteSpace(parentId))
+            {
+                RepairLegacyForgeArguments(child);
+                return child;
+            }
             var parent = LoadVersionChain(parentId);
             var merged = (JsonObject)JsonNode.Parse(parent.ToJsonString())!;
             merged["id"] = versionId;
             if (child["mainClass"] != null) merged["mainClass"] = child["mainClass"]!.DeepCloneCompat();
+            // Legacy Forge (1.7.10 and older) uses minecraftArguments with
+            // --tweakClass; it must override the vanilla argument string.
+            if (child["minecraftArguments"] != null)
+                merged["minecraftArguments"] = child["minecraftArguments"]!.DeepCloneCompat();
+            RepairLegacyForgeArguments(merged);
             if (child["libraries"] is JsonArray childLibs)
             {
                 var libs = new JsonArray();

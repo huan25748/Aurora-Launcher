@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -15,6 +16,7 @@ namespace AuroraLauncher
         private const long MultipartMinSize = 4_000_000;
         private const int MaxSegmentsPerFile = 8;
         private static readonly SemaphoreSlim SegmentGate = new(128);
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> FileGates = new(StringComparer.OrdinalIgnoreCase);
 
         private static readonly HttpClient Http = new HttpClient(new SocketsHttpHandler
         {
@@ -139,6 +141,15 @@ namespace AuroraLauncher
 
         public static async Task Download(string url, string destination, string? sha1 = null, long size = 0, CancellationToken token = default, Action<long, long>? onProgress = null)
         {
+            var key = Path.GetFullPath(destination);
+            var gate = FileGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(token);
+            try { await DownloadCore(url, destination, sha1, size, token, onProgress); }
+            finally { gate.Release(); }
+        }
+
+        private static async Task DownloadCore(string url, string destination, string? sha1, long size, CancellationToken token, Action<long, long>? onProgress)
+        {
             if (File.Exists(destination))
             {
                 if (string.IsNullOrEmpty(sha1) || CheckSha1(destination, sha1))
@@ -154,7 +165,7 @@ namespace AuroraLauncher
             {
                 foreach (var candidate in candidates)
                 {
-                    var temp = destination + ".part";
+                    var temp = destination + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
                     try
                     {
                         var total = size;
@@ -274,10 +285,15 @@ namespace AuroraLauncher
                         {
                             try
                             {
-                                var written = await DownloadSegment(url, segment.File, segment.Start, segment.End, token);
+                                long segmentReceived = 0;
+                                var written = await DownloadSegment(url, segment.File, segment.Start, segment.End, token, bytes =>
+                                {
+                                    var delta = bytes - segmentReceived;
+                                    if (delta <= 0) return;
+                                    segmentReceived = bytes;
+                                    onProgress?.Invoke(Math.Min(total, Interlocked.Add(ref received, delta)), total);
+                                });
                                 if (written != segment.End - segment.Start + 1) throw new Exception("分段大小不匹配");
-                                Interlocked.Add(ref received, written);
-                                onProgress?.Invoke(Math.Min(total, Interlocked.Read(ref received)), total);
                                 return;
                             }
                             catch when (attempt < 2) { await Task.Delay(300 * (attempt + 1), token); }
@@ -306,7 +322,7 @@ namespace AuroraLauncher
             }
         }
 
-        private static async Task<long> DownloadSegment(string url, string file, long start, long end, CancellationToken token)
+        private static async Task<long> DownloadSegment(string url, string file, long start, long end, CancellationToken token, Action<long>? onProgress = null)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(60));
@@ -330,6 +346,7 @@ namespace AuroraLauncher
                     if (read <= 0) break;
                     await output.WriteAsync(buffer.AsMemory(0, read), CancellationToken.None);
                     received += read;
+                    onProgress?.Invoke(received);
                 }
             }
             return received;

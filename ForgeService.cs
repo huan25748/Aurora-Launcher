@@ -143,6 +143,22 @@ namespace AuroraLauncher
             var cleanupBefore = VersionCleanup.Snapshot();
             try
             {
+            // Old launcher: if this exact loader version is already installed,
+            // reuse the profile instead of running the full installer again.
+            if (!string.IsNullOrWhiteSpace(loaderVersion))
+            {
+                var reused = FindInstalledLoader(kind, mcVersion, loaderVersion!);
+                if (reused != null)
+                {
+                    var reuseStep = ProgressService.Step("检查已安装版本", 1, reused);
+                    ProgressService.UpdateAt(reuseStep, 1, "已安装，跳过重复安装");
+                    string? reuseInstance = null;
+                    if (createInstance)
+                        reuseInstance = MinecraftInstallService.CreateInstance(reused, instanceName ?? reused, kind, loaderVersion!, mcVersion, cleanupBefore);
+                    ProgressService.Complete();
+                    return new JsonObject { ["instanceId"] = reuseInstance, ["versionId"] = reused, ["loaderVersion"] = loaderVersion };
+                }
+            }
             ProgressService.Step($"获取 {(kind == "forge" ? "Forge" : "NeoForge")} 版本列表", 1, mcVersion);
             var list = await List(kind, mcVersion, token);
             var versions = list.OfType<JsonObject>().Select(item => item["version"]?.GetValue<string>() ?? "").Where(v => v.Length > 0).ToList();
@@ -154,21 +170,64 @@ namespace AuroraLauncher
 
             var installerPath = Path.Combine(AppPaths.SettingsDir, "cache", "installers", $"{kind}-{chosen}-installer.jar");
             Directory.CreateDirectory(Path.GetDirectoryName(installerPath)!);
-            var downloadUrl = kind == "forge"
-                ? $"https://maven.minecraftforge.net/net/minecraftforge/forge/{mcVersion}-{chosen}/forge-{mcVersion}-{chosen}-installer.jar"
-                : chosen.StartsWith(mcVersion + "-")
-                    ? $"https://maven.neoforged.net/releases/net/neoforged/forge/{chosen}/forge-{chosen}-installer.jar"
-                    : $"https://maven.neoforged.net/releases/net/neoforged/neoforge/{chosen}/neoforge-{chosen}-installer.jar";
-            var installerStep = ProgressService.Step("下载安装器", 1, downloadUrl);
-            var installerTask = DownloadService.Download(downloadUrl, installerPath, null, 0, token, (received, total) =>
+            var installerUrls = new List<string>();
+            if (kind == "forge")
             {
-                if (total > 0) ProgressService.TotalAt(installerStep, total);
-                ProgressService.ProgressAt(installerStep, received, (received / 1024d / 1024d).ToString("0.0") + " MB" + (total > 0 ? " / " + (total / 1024d / 1024d).ToString("0.0") + " MB" : ""));
+                installerUrls.Add($"https://maven.minecraftforge.net/net/minecraftforge/forge/{mcVersion}-{chosen}/forge-{mcVersion}-{chosen}-installer.jar");
+                // Forge 1.7.10 and other legacy builds use the
+                // <mc>-<loader>-<mc> directory/artifact name.
+                if (!chosen.EndsWith("-" + mcVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    var legacy = $"{mcVersion}-{chosen}-{mcVersion}";
+                    installerUrls.Add($"https://maven.minecraftforge.net/net/minecraftforge/forge/{legacy}/forge-{legacy}-installer.jar");
+                }
+            }
+            else
+            {
+                installerUrls.Add(chosen.StartsWith(mcVersion + "-")
+                    ? $"https://maven.neoforged.net/releases/net/neoforged/forge/{chosen}/forge-{chosen}-installer.jar"
+                    : $"https://maven.neoforged.net/releases/net/neoforged/neoforge/{chosen}/neoforge-{chosen}-installer.jar");
+            }
+            var installerStep = ProgressService.Step("下载安装器", 1, installerUrls[0]);
+            var installerTask = Task.Run(async () =>
+            {
+                Exception? last = null;
+                foreach (var downloadUrl in installerUrls)
+                {
+                    try
+                    {
+                        await DownloadService.Download(downloadUrl, installerPath, null, 0, token, (received, total) =>
+                        {
+                            if (total > 0) ProgressService.TotalAt(installerStep, total);
+                            ProgressService.ProgressAt(installerStep, received, (received / 1024d / 1024d).ToString("0.0") + " MB" + (total > 0 ? " / " + (total / 1024d / 1024d).ToString("0.0") + " MB" : ""));
+                        });
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        last = ex;
+                        ProgressService.Detail("切换安装器下载源");
+                    }
+                }
+                throw last ?? new Exception("安装器下载失败");
             });
             await Task.WhenAll(baseTask, installerTask);
+            ProgressService.TotalAt(installerStep, 1);
             ProgressService.UpdateAt(installerStep, 1, "安装器已下载");
             EnsureLauncherProfiles();
-            try { await PrefetchInstallerLibraries(installerPath, token); }
+            if (kind == "forge" && IsLegacyForgeInstaller(installerPath))
+            {
+                await baseTask;
+                ProgressService.Step("安装旧版 Forge", 1, chosen);
+                var legacyVersion = await InstallLegacyForge(installerPath, mcVersion, chosen, token);
+                string? legacyInstance = null;
+                if (createInstance)
+                    legacyInstance = MinecraftInstallService.CreateInstance(legacyVersion, instanceName ?? legacyVersion, kind, chosen, mcVersion, cleanupBefore);
+                ProgressService.Update(1, "旧版 Forge 已安装");
+                ProgressService.Complete();
+                return new JsonObject { ["instanceId"] = legacyInstance, ["versionId"] = legacyVersion, ["loaderVersion"] = chosen };
+            }
+            try { await PrefetchInstallerLibraries(installerPath, mcVersion, token); }
             catch (Exception ex) { GameEvents.Emit("log", new JsonObject { ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), ["source"] = "launcher", ["level"] = "warning", ["text"] = "Forge 依赖预下载失败：" + ex.Message }); }
 
             ProgressService.Step("运行安装器", 1, chosen);
@@ -211,11 +270,72 @@ namespace AuroraLauncher
             }
         }
 
-        private static async Task PrefetchInstallerLibraries(string installerPath, CancellationToken token)
+        private static bool IsLegacyForgeInstaller(string installerPath)
+        {
+            try
+            {
+                using var zip = ZipFile.OpenRead(installerPath);
+                return zip.GetEntry("version.json") == null && zip.GetEntry("install_profile.json") != null;
+            }
+            catch { return false; }
+        }
+
+        // Forge 1.7.10 and similar "simple installer" builds do not understand
+        // --installClient. Their profile already contains the complete version
+        // JSON and a universal jar, so install it directly like PCL does.
+        private static async Task<string> InstallLegacyForge(string installerPath, string mcVersion, string loaderVersion, CancellationToken token)
+        {
+            using var zip = ZipFile.OpenRead(installerPath);
+            var profileEntry = zip.GetEntry("install_profile.json") ?? throw new Exception("旧版 Forge 安装器缺少 install_profile.json");
+            JsonObject profile;
+            using (var stream = profileEntry.Open())
+            using (var reader = new StreamReader(stream))
+                profile = JsonNode.Parse(await reader.ReadToEndAsync()) as JsonObject ?? throw new Exception("旧版 Forge install_profile 格式错误");
+            var versionInfo = profile["versionInfo"] as JsonObject ?? throw new Exception("旧版 Forge 安装器缺少 versionInfo");
+            var version = (JsonObject)JsonNode.Parse(versionInfo.ToJsonString())!;
+            var versionId = version["id"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(versionId)) versionId = $"{mcVersion}-forge-{loaderVersion}";
+            var versionDir = Path.Combine(VersionsDir, versionId!);
+            Directory.CreateDirectory(versionDir);
+
+            var libsDir = Path.Combine(AppPaths.RootDir, "libraries");
+            var universalName = profile["install"]?["filePath"]?.GetValue<string>();
+            var universalEntry = string.IsNullOrWhiteSpace(universalName) ? null : zip.GetEntry(universalName!);
+            if (version["libraries"] is JsonArray libraries)
+            {
+                foreach (var item in libraries.OfType<JsonObject>())
+                {
+                    var name = item["name"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    var isForgeUniversal = name.StartsWith("net.minecraftforge:forge:", StringComparison.OrdinalIgnoreCase)
+                        && name.Split(':').Length == 3;
+                    if (isForgeUniversal) name += ":universal";
+                    var relative = MavenPath(name);
+                    if (string.IsNullOrWhiteSpace(relative)) continue;
+                    var target = Path.Combine(libsDir, relative.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    if (isForgeUniversal && universalEntry != null)
+                    {
+                        item["name"] = name;
+                        universalEntry.ExtractToFile(target, true);
+                        continue;
+                    }
+                    var baseUrl = item["url"]?.GetValue<string>();
+                    if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "https://bmclapi2.bangbang93.com/maven/";
+                    if (!File.Exists(target) || new FileInfo(target).Length == 0)
+                        await DownloadService.Download(baseUrl!.TrimEnd('/') + "/" + relative, target, null, 0, token);
+                }
+            }
+            File.WriteAllText(Path.Combine(versionDir, versionId + ".json"), version.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            return versionId!;
+        }
+
+        private static async Task PrefetchInstallerLibraries(string installerPath, string mcVersion, CancellationToken token)
         {
             var librariesDir = Path.Combine(AppPaths.RootDir, "libraries");
             var tasks = new List<(string Url, string Path, string? Sha1)>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string? mappingsCoord = null;
 
             void Add(string? name, string? baseUrl, JsonNode? artifact)
             {
@@ -242,6 +362,7 @@ namespace AuroraLauncher
                     using var stream = entry.Open();
                     using var reader = new StreamReader(stream);
                     var json = JsonNode.Parse(await reader.ReadToEndAsync()) as JsonObject;
+                    mappingsCoord ??= json?["data"]?["MOJMAPS"]?["client"]?.GetValue<string>();
                     if (json?["libraries"] is JsonArray libraries)
                     {
                         foreach (var item in libraries)
@@ -297,6 +418,81 @@ namespace AuroraLauncher
                         $"{current}/{tasks.Count} · {MinecraftInstallService.FormatBytes(System.Threading.Interlocked.Read(ref downloadedBytes))} · {Path.GetFileName(item.Path)}");
                 }
             }));
+
+            // Old launcher also pre-downloaded the client mappings referenced by
+            // MOJMAPS; otherwise the installer runs DOWNLOAD_MOJMAPS again.
+            if (!string.IsNullOrWhiteSpace(mappingsCoord))
+            {
+                try
+                {
+                    var relative = MavenPath(mappingsCoord.Trim('[', ']'));
+                    if (!string.IsNullOrWhiteSpace(relative))
+                    {
+                        var dest = Path.Combine(librariesDir, relative!.Replace('/', Path.DirectorySeparatorChar));
+                        if (!File.Exists(dest))
+                        {
+                            var manifest = await VersionService.Manifest(false);
+                            var summary = (manifest["versions"] as JsonArray)?.OfType<JsonObject>()
+                                .FirstOrDefault(item => item["id"]?.GetValue<string>() == mcVersion);
+                            var versionUrl = summary?["url"]?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(versionUrl))
+                            {
+                                var versionJson = JsonNode.Parse(await DownloadService.GetTextOfficial(versionUrl!, token)) as JsonObject;
+                                var mappingsUrl = versionJson?["downloads"]?["client_mappings"]?["url"]?.GetValue<string>();
+                                if (!string.IsNullOrWhiteSpace(mappingsUrl))
+                                {
+                                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                                    await DownloadService.Download(mappingsUrl!, dest, null, 0, token);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    GameEvents.Emit("log", new JsonObject
+                    {
+                        ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        ["source"] = "launcher",
+                        ["level"] = "warning",
+                        ["text"] = "预下载 Mappings 失败，安装器会重试：" + ex.Message
+                    });
+                }
+            }
+        }
+
+        private static string? FindInstalledLoader(string kind, string mcVersion, string loaderVersion)
+        {
+            if (!Directory.Exists(VersionsDir)) return null;
+            var needle = kind == "forge" ? "net.minecraftforge" : "net.neoforged";
+            foreach (var dir in Directory.GetDirectories(VersionsDir))
+            {
+                var id = Path.GetFileName(dir);
+                if (string.IsNullOrWhiteSpace(id) || !id.Contains(loaderVersion, StringComparison.OrdinalIgnoreCase)) continue;
+                var jsonPath = Path.Combine(dir, id + ".json");
+                if (!File.Exists(jsonPath)) continue;
+                try
+                {
+                    var json = JsonNode.Parse(File.ReadAllText(jsonPath)) as JsonObject;
+                    if (json == null) continue;
+                    var parent = json["inheritsFrom"]?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(parent) && !string.Equals(parent, mcVersion, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (json["libraries"] is not JsonArray libraries) continue;
+                    var text = libraries.ToJsonString();
+                    if (!text.Contains(needle, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (kind == "forge" && text.Contains("net.neoforged", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (kind == "neoforge" && !text.Contains("net.neoforged", StringComparison.OrdinalIgnoreCase)) continue;
+                    var paths = libraries.OfType<JsonObject>()
+                        .Select(lib => lib["downloads"]?["artifact"]?["path"]?.GetValue<string>()
+                            ?? (lib["name"]?.GetValue<string>() is string name ? MavenPath(name) : null))
+                        .Where(path => !string.IsNullOrWhiteSpace(path)).ToList();
+                    if (paths.Count == 0) continue;
+                    var missing = paths.Count(path => !File.Exists(Path.Combine(AppPaths.RootDir, "libraries", path!.Replace('/', Path.DirectorySeparatorChar))));
+                    if (missing * 5 <= paths.Count) return id;
+                }
+                catch { }
+            }
+            return null;
         }
 
         private static async Task<string> RunInstaller(string kind, string mcVersion, string loaderVersion, string installerPath, CancellationToken token)
@@ -321,7 +517,11 @@ namespace AuroraLauncher
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true
+                    RedirectStandardError = true,
+                    // Old launcher decoded the installer log as UTF-8. Java 17+
+                    // writes UTF-8 here even on Chinese Windows.
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding = System.Text.Encoding.UTF8
                 };
                 info.ArgumentList.Add("-Djava.awt.headless=true");
                 info.ArgumentList.Add("-jar");
@@ -342,6 +542,19 @@ namespace AuroraLauncher
                         if (!Regex.IsMatch(text, "^(Extracting json|Downloading libraries|Building Processors|Task:|Downloading library from|Injecting profile|Successfully installed)", RegexOptions.IgnoreCase)
                             && !Regex.IsMatch(text, "Exception|Error|Failed|WARN", RegexOptions.IgnoreCase)) return;
                         lock (output) output.AppendLine(text);
+                        // Old launcher only forwarded the filtered stage/error lines
+                        // to the console; forwarding every class line starved the UI.
+                        try
+                        {
+                            GameEvents.Emit("log", new JsonObject
+                            {
+                                ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                ["source"] = "installer",
+                                ["level"] = "info",
+                                ["text"] = text
+                            });
+                        }
+                        catch { }
                         ProgressService.Detail(text);
                     }
                     using var process = new Process { StartInfo = info, EnableRaisingEvents = true };
