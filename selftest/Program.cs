@@ -10,6 +10,27 @@ static class Program {
       foreach (var item in items) Console.WriteLine($"{item?["id"]} | {item?["title"]} | {item?["content"]?.GetValue<string>()?.Length ?? 0} | {item?["image"]}");
       return;
     }
+    if (args.Length > 0 && args[0] == "et") {
+      Console.WriteLine(EasyTierService.Status().ToJsonString());
+      return;
+    }
+    if (args.Length > 0 && args[0] == "update") {
+      Console.WriteLine((await UpdateService.Check(true)).ToJsonString());
+      return;
+    }
+    if (args.Length > 0 && args[0] == "etinvite") {
+      Console.WriteLine(EasyTierService.CreateInvite(new System.Text.Json.Nodes.JsonObject { ["server"] = "tcp://225284.xyz:11010" }).ToJsonString());
+      return;
+    }
+    if (args.Length > 0 && args[0] == "etlat") {
+      Console.WriteLine((await EasyTierService.Latency("tcp://easytier-us.slarker.me:11010")).ToJsonString());
+      Console.WriteLine((await EasyTierService.Latency("tcp://225284.xyz:11010")).ToJsonString());
+      return;
+    }
+    if (args.Length > 0 && args[0] == "etinstall") {
+      Console.WriteLine((await EasyTierService.Ensure()).ToJsonString());
+      return;
+    }
     if (args.Length > 0 && args[0] == "repair") {
       AppPaths.UseRoot("D:\\Minecraft\\.minecraft");
       var repaired = InstanceArchiveService.ImportExisting(false);

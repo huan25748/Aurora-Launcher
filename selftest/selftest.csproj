@@ -33,6 +33,9 @@
     <Compile Include="..\InstanceArchiveService.cs" Link="InstanceArchiveService.cs" />
     <Compile Include="..\LocalModpackService.cs" Link="LocalModpackService.cs" />
     <Compile Include="..\VersionCleanup.cs" Link="VersionCleanup.cs" />
+    <Compile Include="..\EasyTierService.cs" Link="EasyTierService.cs" />
+    <Compile Include="..\LanScanService.cs" Link="LanScanService.cs" />
+    <Compile Include="..\FirewallService.cs" Link="FirewallService.cs" />
   </ItemGroup>
 </Project>
 
