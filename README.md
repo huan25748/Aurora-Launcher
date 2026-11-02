@@ -2,7 +2,7 @@
 
 Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
 
-本文档以 **1.2.26** 为基线，介绍启动器当前已经具备的功能；后续版本的新功能会逐步补充到 README 中。
+本文档以 **2.0.0.0** 为基线，介绍启动器当前已经具备的功能。
 
 项目前身是 Electron 版 Aurora Launcher 1.0.78；本仓库是使用 **.NET 6 + WPF + WebView2** 重写的当前版本。
 
@@ -22,7 +22,7 @@ Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
 
 - 原版 Minecraft 安装与启动。
 - Fabric、Quilt、Forge、NeoForge 安装流程。
-- OptiFine 版本下载，支持放入 Forge 实例的 `mods` 目录。
+- OptiFine 支持独立版本安装；实例已有 Fabric / Quilt / Forge / NeoForge 时只把 jar 放入 `mods` 目录，并提供自动 / BMCLAPI / 官方三种下载源。
 - 原版下载页支持：
 
 ```text
@@ -58,7 +58,7 @@ Minecraft 1.20.5+   至少 Java 21
 ### 账户
 
 - Microsoft 账户：OAuth 设备代码登录。
-- Authlib-Injector 第三方登录。
+- Authlib-Injector 第三方登录，内置 LittleSkin 预设，也可填写其他验证服务器。
 - 离线账户。
 - 账户数据保存在：
 
@@ -71,7 +71,7 @@ Minecraft 1.20.5+   至少 Java 21
 ### 联机
 
 - 基于 EasyTier 的 P2P 虚拟局域网。
-- 内置公共服务器：
+- 内置公共服务器，可自选节点、检测延迟，也可以添加自定义服务器：
 
 ```text
 tcp://public.easytier.top:11010
@@ -80,8 +80,12 @@ udp://public.easytier.top:11010
 
 - 公共服务器延迟检测。
 - 支持自定义 EasyTier 服务器地址。
-- 支持创建房间、设置网络名称与密码。
-- 显示节点信息，便于朋友通过虚拟 IP 连接 Minecraft 局域网世界。
+- 创建房间后生成邀请码，朋友粘贴邀请码即可进入同一个虚拟局域网。
+- 显示房间成员、房主虚拟 IP 与局域网端口，可扫描局域网并复制地址。
+- 支持修复防火墙；Windows 首次使用可能需要允许 TUN 驱动或管理员权限。
+- 陶瓦联机（Terracotta）：联机页可与 EasyTier 自由切换。
+- 陶瓦联机与 HMCL 使用同一套房间码，两边创建的房间可以互相加入。
+- 陶瓦联机支持一键安装、创建房间、加入房间、成员列表与备用直连地址。
 
 ### 实例
 
@@ -108,7 +112,10 @@ vanilla
 ```
 
 - 之前被误判为原版的 NeoForge 实例会自动修正。
-- 支持实例复制、导出、导入、删除和整合包导出。
+- 支持实例复制、导入、删除和整合包导出。
+- 整合包导出按 PCL 流程生成：复制实例内容到 `overrides/`，对 jar/zip 计算 SHA1 与 Murmur2 指纹，用 Modrinth / CurseForge 反查下载地址。
+- 已被识别的文件写入 `modrinth.index.json` 的 `files[]`，不重复打包；只有配置、脚本与未识别文件进入 `overrides/`。
+- 导出格式支持 `.mrpack` 与 `.zip`，内容相同，仅扩展名不同。
 
 ### 下载
 
@@ -118,12 +125,21 @@ vanilla
 - 并发下载客户端、依赖库和资源文件。
 - 下载进度按实际步骤显示。
 - 支持 Modrinth、CurseForge 搜索、详情、版本与安装。
+- 模组 / 整合包与游戏本体使用分开的分段策略：
+- 模组 CDN：256KB 起允许分段，小于等于 1MB 用 64KB 一段，1～8MB 用 256KB 一段。
+- 游戏本体 / 加载器：小于 4MB 单连接，4MB 起 1MB 一段，64MB 起最多 640 段。
+- 按下载主机检测是否支持 Range，不支持时自动降级为单连接，避免 404 重试。
+- 下载源设置对下载候选与版本列表生效；Modrinth 支持自动、官方、镜像，分类下载源可按原版 / Forge / NeoForge / Fabric / Quilt 单独指定。
+- Fabric API 版本列表由 Modrinth 查询并按实例 MC 版本精确过滤，下载优先 CurseForge，失败回退 Modrinth。
 - 支持本地 `.mrpack` 导入。
 - 支持整合包安装与实例创建。
 
 ### 内容管理
 
 - 模组。
+- 安装模组前解析前置依赖，弹窗列出必装与可选前置，可勾选一并下载；已安装按模组身份判断，版本不同也算已安装。
+- 勾选可选依赖时自动带出它自己的必装前置。
+- 模组详情提供「在 MC百科 查看」，按中文名、英文名及常见写法依次查询。
 - 资源包。
 - 光影。
 - 数据包。
@@ -136,23 +152,17 @@ vanilla
 ### 资讯
 
 - 首页显示最新正式版与最新预览版。
-- 版本资讯来自 PCL2 新闻主页 API：
-
-```text
-https://news.bugjump.net/apis/versions/latest
-```
-
-- 完整更新日志来自 PCL2-NewsHomepage 的版本 Markdown。
-- 读取版本 Markdown 文件头中的封面图。
-- 点击资讯打开站内阅读弹窗，不直接跳转浏览器。
-- 弹窗显示标题、日期、完整正文、来源链接。
-- 右上角“更多”打开 Minecraft 官方文章页：
+- 版本列表来自 Mojang 官方版本清单，与下载页共用同一份数据。
+- 版本正文与配图来自 Mojang 官方 `javaPatchNotes` 与 minecraft.net 文章。
+- 普通新闻读取 minecraft.net 首页 LATEST NEWS 网格的第一条。
+- 点击新闻卡片直接在站内显示完整正文，不跳转浏览器。
+- 右上角「更多」打开 Minecraft 官方文章页：
 
 ```text
 https://www.minecraft.net/zh-hans/article
 ```
 
-- 普通 Mojang 新闻从官方 `news.json` 合并读取。
+- 刷新按钮点击后禁用并显示「刷新中…」，成功或失败都会提示。
 
 ### 启动
 
@@ -163,7 +173,7 @@ https://www.minecraft.net/zh-hans/article
 - JVM 参数与游戏参数替换。
 - 启动前处理首次启动语言。
 - 关闭启动器窗口不会结束正在运行的游戏。
-- 游戏日志从 `logs/latest.log` 读取，不再重定向 stdout/stderr。
+- 同时捕获游戏 stdout/stderr 并读取 `logs/latest.log`，进程退出后停止监听。
 - 崩溃分析支持：
 
 ```text
@@ -189,6 +199,7 @@ log4j / ModLauncher 签名不匹配
 - 缓存与安装器残留清理。
 - 未使用依赖库与资源精简。
 - 本地日志与操作记录。
+- 游戏时长统计：游戏退出时累加到实例，首页显示总时长。
 
 ---
 
@@ -258,19 +269,13 @@ web/aurora-shim.js
 - NeoForge、Forge 其他版本的兼容矩阵仍在持续验证。
 - 离线账户与 Microsoft 账户的存档按 UUID 独立，不提供跨账户自动迁移。
 - 当前主要面向 Windows x64。
+- 2.0.0.0 起，安装、下载、内容管理、陶瓦联机与整合包导出进入稳定版本线。
 
 ---
 
 ## 特别鸣谢
 
 本项目使用了以下镜像、数据接口与开放资源：
-
-### Light-Beacon / PCL2-NewsHomepage
-
-PCL2 新闻主页 API 与版本更新日志数据。
-
-- https://github.com/Light-Beacon/PCL2-NewsHomepage
-- https://news.bugjump.net/
 
 ### bangbang93 / BMCLAPI
 
@@ -314,6 +319,13 @@ PCL2 新闻主页 API 与版本更新日志数据。
 
 - https://github.com/EasyTier/EasyTier
 - https://easytier.rs/
+
+### Terracotta / 陶瓦联机
+
+提供陶瓦联机的二进制与 HTTP 接口协议。
+
+- https://github.com/burningtnt/Terracotta
+- https://burningtnt.github.io/Terracotta/
 
 ### PCL / PCL-CE
 
