@@ -37,16 +37,13 @@
       return
     }
     const id = 'rpc-' + nextInvokeId++
-    const timeoutMs = (channel.startsWith('install:') || channel === 'easytier:install' || channel === 'updates:download'
-      || channel === 'curseforge:install-pack' || channel === 'modrinth:install-pack'
-      || channel === 'curseforge:install' || channel === 'modrinth:install') ? 0 : 60000
-    const timer = timeoutMs > 0 ? setTimeout(() => {
-      pending.delete(id)
-      reject(new Error('后端响应超时：' + channel))
-    }, timeoutMs) : null
+    // No frontend-side timeout: long operations (asset downloads, installers,
+    // first launch) legitimately run for minutes and a rejected promise here
+    // only produces a misleading "backend timeout" toast while the backend
+    // keeps working.
     pending.set(id, {
-      resolve: (value) => { if (timer) clearTimeout(timer); resolve(value) },
-      reject: (error) => { if (timer) clearTimeout(timer); reject(error) }
+      resolve: (value) => resolve(value),
+      reject: (error) => reject(error)
     })
     window.chrome.webview.postMessage({ type: 'invoke', id, channel, args })
   })
@@ -168,12 +165,13 @@
       get: async (id) => { try { return await invoke('instances:get', id) } catch { return bootInstances.find((item) => item.id === id) || null } },
       create: async (input) => { try { return await invoke('instances:create', input) } catch { return null } },
       update: async (id, patch) => { try { return await invoke('instances:update', id, patch) } catch { return null } },
+      setOnlineMode: async (id, enabled) => { try { return await invoke('instances:online-mode', id, enabled) } catch { return false } },
       remove: async (id, deleteFiles) => { try { return await invoke('instances:remove', id, deleteFiles) } catch { return null } },
       copy: async (id, name) => { try { return await invoke('instances:copy', id, name) } catch { return null } },
       size: async (id) => { try { return await invoke('instances:size', id) } catch { return { size: 0 } } },
       openFolder: async (id, sub) => { try { return await invoke('instances:open-folder', id, sub) } catch { return null } },
       export: async (id) => { try { return await invoke('instances:export', id) } catch { return { path: '' } } },
-      exportPack: async (id) => { try { return await invoke('instances:export-pack', id) } catch { return { path: '', size: 0, files: 0 } } },
+      exportPack: async (options) => { try { return await invoke('instances:export-pack', options) } catch { return { path: '', size: 0, files: 0 } } },
       import: async () => { try { return await invoke('instances:import') } catch { return null } },
       importExisting: async () => { try { return await invoke('instances:import-existing') } catch { return 0 } }
     },
@@ -187,8 +185,15 @@
       backupWorld: async (instanceId, folder) => { try { return await invoke('content:backup-world', instanceId, folder) } catch { return { path: '' } } },
       deleteWorld: async (instanceId, folder) => { try { return await invoke('content:delete-world', instanceId, folder) } catch { return null } }
     },
+    mcmodEnglish: async (query) => { try { return await invoke('mcmod:english', query) } catch { return '' } },
+    skin: {
+      install: (instanceId) => invoke('skin:install', instanceId)
+    },
+    mcmod: {
+      search: async (query, alt) => { try { return await invoke('mcmod:search', query, alt) } catch { return '' } }
+    },
     modrinth: {
-      search: async (params) => { try { return await invoke('modrinth:search', params) } catch { return emptySearch } },
+      search: async (params) => { try { if (params && params.query && /[\u4e00-\u9fff]/.test(params.query)) { const en = await invoke('mcmod:english', params.query).catch(() => ''); if (en) params = { ...params, query: en } } return await invoke('modrinth:search', params) } catch { return emptySearch } },
       project: async (id) => { try { return await invoke('modrinth:project', id) } catch { return null } },
       versions: async (projectId, mcVersion, loader) => { try { return await invoke('modrinth:versions', projectId, mcVersion, loader) } catch { return [] } },
       translations: async () => ({}),
@@ -210,11 +215,16 @@
       prune: async () => { try { return await invoke('storage:prune') } catch { return 0 } }
     },
     modnames: { translate: async (names) => { try { return await invoke('modnames:translate', names) } catch { return {} } } },
+    mods: {
+      dependencies: async (input) => { try { return await invoke('mods:dependencies', input) } catch { return [] } },
+    },
     curseforge: {
-      search: async (params) => { try { return await invoke('curseforge:search', params) } catch { return emptySearch } },
+      search: async (params) => { try { if (params && params.query && /[\u4e00-\u9fff]/.test(params.query)) { const en = await invoke('mcmod:english', params.query).catch(() => ''); if (en) params = { ...params, query: en } } return await invoke('curseforge:search', params) } catch { return emptySearch } },
       categories: async (type) => { try { return await invoke('curseforge:categories', type) } catch { return [] } },
       project: async (id) => { try { return await invoke('curseforge:project', id) } catch { return null } },
       files: async (id, mcVersion, loader) => { try { return await invoke('curseforge:files', id, mcVersion, loader) } catch { return [] } },
+      fileCount: async (id) => { try { return await invoke('curseforge:file-count', id) } catch { return 0 } },
+      filesPage: async (id, index, pageSize) => { try { return await invoke('curseforge:files-page', id, index, pageSize) } catch { return [] } },
       translations: async () => ({}),
       install: async (opts) => { return await invoke('curseforge:install', opts) },
       installToFolder: async (opts) => { return await invoke('curseforge:install-folder', opts) },
@@ -265,6 +275,15 @@
         return Array.isArray(items) ? items : []
       }
     },
+    terracotta: {
+      install: async (force) => { try { return await invoke('terracotta:install', force === true) } catch (error) { return { ok: false, error: String(error) } } },
+      start: async () => { try { return await invoke('terracotta:start') } catch (error) { return { ok: false, error: String(error) } } },
+      state: async () => { try { return await invoke('terracotta:state') } catch { return { state: 'not-running' } } },
+      host: async (player) => { try { return await invoke('terracotta:host', player) } catch (error) { return { ok: false, error: String(error) } } },
+      join: async (room, player) => { try { return await invoke('terracotta:join', room, player) } catch (error) { return { ok: false, error: String(error) } } },
+      reset: async () => { try { return await invoke('terracotta:reset') } catch { return { ok: false } } },
+      stop: async () => { try { return await invoke('terracotta:stop') } catch { return { ok: false } } }
+    },
     easytier: {
       status: async () => { try { return await invoke('easytier:status') } catch { return null } },
       latency: async (endpoint) => { try { return await invoke('easytier:latency', endpoint) } catch { return { ok: false } } },
@@ -281,6 +300,7 @@
     events: {
       onProgress: (cb) => on('progress', cb),
       onLog: (cb) => on('log', cb),
+      onLogs: (cb) => on('logs', cb),
       onGameState: (cb) => on('game', cb),
       onSettings: (cb) => on('settings', cb),
       onAccounts: (cb) => on('accounts', cb),
@@ -310,7 +330,133 @@
     if (target.closest('button, input, select, textarea, a')) return
     post({ type: 'window', action: 'maximize' })
   })
+
+  const openExportPack = (instance) => {
+    if (!instance || !instance.id) return
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:24px'
+    const card = document.createElement('div')
+    card.style.cssText = 'width:560px;max-height:86vh;overflow:auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:20px;font:13px/1.5 system-ui,Segoe UI,sans-serif;box-shadow:0 24px 60px rgba(0,0,0,.45)'
+    card.innerHTML = ''
+    const title = document.createElement('div')
+    title.textContent = '导出整合包'
+    title.style.cssText = 'font-size:16px;font-weight:600;margin-bottom:14px'
+    card.appendChild(title)
+    const label = (text) => {
+      const el = document.createElement('div')
+      el.textContent = text
+      el.style.cssText = 'font-size:12px;color:var(--muted);margin:12px 0 4px'
+      card.appendChild(el)
+      return el
+    }
+    const input = (placeholder, value) => {
+      const el = document.createElement('input')
+      el.className = 'input'
+      el.placeholder = placeholder
+      el.value = value || ''
+      el.style.cssText = 'width:100%;box-sizing:border-box;padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);outline:none'
+      card.appendChild(el)
+      return el
+    }
+    label('导出格式')
+    const formats = [['mrpack', 'Modrinth 整合包 (.mrpack)'], ['zip', 'Zip 压缩包 (.zip，内容与 mrpack 相同)']]
+    const formatInputs = []
+    formats.forEach(([value, text], index) => {
+      const row = document.createElement('label')
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 2px;cursor:pointer'
+      const radio = document.createElement('input')
+      radio.type = 'radio'
+      radio.name = 'aurora-export-format'
+      radio.value = value
+      radio.checked = index === 0
+      formatInputs.push(radio)
+      row.appendChild(radio)
+      const span = document.createElement('span')
+      span.textContent = text
+      row.appendChild(span)
+      card.appendChild(row)
+    })
+    label('包名称')
+    const nameInput = input('实例名称', instance.name || '')
+    label('包版本号')
+    const versionInput = input('1.0.0', '1.0.0')
+    label('作者（可留空）')
+    const authorInput = input('作者', '')
+    label('简介（可留空）')
+    const summaryInput = input('简介', '')
+    label('导出到')
+    const folderRow = document.createElement('div')
+    folderRow.style.cssText = 'display:flex;gap:8px;align-items:center'
+    const folderInput = document.createElement('input')
+    folderInput.className = 'input'
+    folderInput.placeholder = '默认：.aurora/packs'
+    folderInput.style.cssText = 'flex:1;box-sizing:border-box;padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);outline:none'
+    const choose = document.createElement('button')
+    choose.className = 'btn'
+    choose.textContent = '选择文件夹'
+    choose.style.cssText = 'padding:7px 12px;border-radius:7px;border:1px solid var(--line);background:var(--panel-hover);color:var(--text);cursor:pointer'
+    choose.addEventListener('click', async () => {
+      const picked = await api.app.pickDirectory('选择导出文件夹', folderInput.value)
+      const path = picked && picked.paths && picked.paths.length ? picked.paths[0] : ''
+      if (path) folderInput.value = path
+    })
+    const openButton = document.createElement('button')
+    openButton.className = 'btn'
+    openButton.textContent = '打开'
+    openButton.style.cssText = choose.style.cssText
+    openButton.addEventListener('click', () => { if (folderInput.value) api.app.openPath(folderInput.value) })
+    folderRow.appendChild(folderInput)
+    folderRow.appendChild(choose)
+    folderRow.appendChild(openButton)
+    card.appendChild(folderRow)
+    const status = document.createElement('div')
+    status.style.cssText = 'margin-top:12px;font-size:12px;color:var(--muted);min-height:18px;word-break:break-all'
+    card.appendChild(status)
+    const actions = document.createElement('div')
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px'
+    const cancel = document.createElement('button')
+    cancel.textContent = '取消'
+    cancel.style.cssText = 'padding:8px 16px;border-radius:7px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer'
+    const confirm = document.createElement('button')
+    confirm.textContent = '开始导出'
+    confirm.style.cssText = 'padding:8px 18px;border-radius:7px;border:none;background:var(--acc1);color:#1a1a1a;font-weight:600;cursor:pointer'
+    actions.appendChild(cancel)
+    actions.appendChild(confirm)
+    card.appendChild(actions)
+    cancel.addEventListener('click', () => overlay.remove())
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) overlay.remove() })
+    confirm.addEventListener('click', async () => {
+      const format = (formatInputs.find((item) => item.checked) || formatInputs[0]).value
+      confirm.disabled = true
+      confirm.style.opacity = '.6'
+      status.textContent = '正在导出…'
+      try {
+        const result = await api.instances.exportPack({
+          id: instance.id,
+          format,
+          name: nameInput.value.trim() || instance.name || '',
+          version: versionInput.value.trim() || '1.0.0',
+          author: authorInput.value.trim(),
+          summary: summaryInput.value.trim(),
+          outputDir: folderInput.value.trim()
+        })
+        status.textContent = result && result.path ? '已导出到 ' + result.path : '导出完成'
+        confirm.textContent = '完成'
+        confirm.disabled = false
+        confirm.style.opacity = '1'
+        confirm.onclick = () => overlay.remove()
+      } catch (error) {
+        status.textContent = '导出失败：' + (error && error.message ? error.message : error)
+        confirm.disabled = false
+        confirm.style.opacity = '1'
+      }
+    })
+    overlay.appendChild(card)
+    document.body.appendChild(overlay)
+  }
+
   window.aurora = api
+  window.auroraPacks = { openExport: openExportPack }
   try {
     const resizeLayer = document.createElement('div')
     resizeLayer.id = 'aurora-resize-layer'
@@ -434,20 +580,18 @@
         hiddenSiblings = Array.from(scroll.children).filter((child) => child !== panel)
         hiddenSiblings.forEach((child) => { child.style.display = 'none' })
       }
-      panel.style.display = 'block'
-      previousActive = document.querySelector('.sidebar .nav-item.active:not(#aurora-easytier-nav)')
-      previousActive?.classList.remove('active')
-      document.getElementById('aurora-easytier-nav')?.classList.add('active')
+      // Refresh before showing so status text does not visibly change after mount.
       await refresh()
+      panel.style.display = 'block'
+      panel.classList.remove('page-enter')
+      void panel.offsetWidth
+      panel.classList.add('page-enter')
       if (refreshTimer) clearInterval(refreshTimer)
       refreshTimer = setInterval(() => void refresh(true), 3500)
     }
     const closePanel = () => {
       if (!panel) return
       panel.style.display = 'none'
-      document.getElementById('aurora-easytier-nav')?.classList.remove('active')
-      if (previousActive && document.contains(previousActive)) previousActive.classList.add('active')
-      previousActive = null
       hiddenSiblings.forEach((child) => { child.style.display = '' })
       hiddenSiblings = []
       if (refreshTimer) clearInterval(refreshTimer)
@@ -515,14 +659,24 @@
       }
     }
 
+    window.__etToggleOnlineMode = async (checked) => {
+      try {
+        const settings = await api.settings.get();
+        const list = await api.instances.list();
+        const instance = (list || []).find((item) => item.id === settings?.lastSelectedInstanceId) || (list || [])[0];
+        if (!instance) return;
+        await api.instances.setOnlineMode(instance.id, !checked);
+      } catch {}
+    };
     const createPanel = () => {
       panel = document.createElement('div')
       panel.className = 'page-enter'
-      panel.style.cssText = 'display:none;padding:0;width:100%;height:100%;overflow:auto'
+      panel.id = 'aurora-easytier-panel'
+      panel.style.cssText = 'display:none;padding:0 2px 0 0;width:100%;height:auto;min-height:calc(100vh - 96px);overflow:visible'
       panel.innerHTML = `
-        <div class="modal wide" role="dialog" aria-label="EasyTier 联机">
-          <div class="modal-head">
-            <div><h3>联机</h3><p>EasyTier 虚拟局域网</p></div>
+        <div class="modal wide" role="dialog" aria-label="EasyTier 联机" style="width:100%;max-width:none;max-height:none;overflow:visible;box-shadow:none;border:none;background:transparent">
+          <div class="page-head">
+            <div class="titles"><h1>联机</h1><p>EasyTier 虚拟局域网</p></div>
           </div>
           <div class="modal-body">
             <div class="card card-pad" style="margin-bottom:14px">
@@ -534,6 +688,10 @@
               </div>
               <div style="margin-top:10px;color:var(--warning);font-size:11px;line-height:1.6">
                 下载或解压 EasyTier 时可能被杀毒软件误报，请先暂时关闭杀毒软件或加入信任。
+              </div>
+              <div style="margin-top:10px;display:flex;align-items:center;gap:8px;color:var(--text-soft);font-size:12px">
+                <input type="checkbox" id="et-offline" onchange="window.__etToggleOnlineMode && window.__etToggleOnlineMode(this.checked)" />
+                <label for="et-offline">关闭正版验证（允许离线玩家加入）</label>
               </div>
               <div id="et-progress-wrap" style="display:none;margin-top:12px">
                 <div class="progress-track"><div class="progress-fill" id="et-progress-fill" style="width:0%"></div></div>
@@ -802,21 +960,198 @@
       const sidebar = document.querySelector('.sidebar')
       if (!sidebar) return
       if (!panel) createPanel()
-      if (!document.getElementById('aurora-easytier-nav')) {
-        const button = document.createElement('button')
-        button.id = 'aurora-easytier-nav'
-        button.className = 'nav-item'
-        button.innerHTML = '<span style="width:19px;height:19px;display:grid;place-items:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="19" r="2.4"/><circle cx="19" cy="19" r="2.4"/><path d="M12 7.4v4.1M12 11.5 6.5 16.8M12 11.5l5.5 5.3"/></svg></span><span>联机</span>'
-        button.addEventListener('click', () => void openPanel())
-        const otherSection = sidebar.querySelectorAll('.nav-section-label')[1]
-        if (otherSection) sidebar.insertBefore(button, otherSection)
-        else sidebar.insertBefore(button, sidebar.querySelector('.sidebar-spacer, .sidebar-foot') || null)
+      if (!window.__auroraEasyTierBound) {
+        window.__auroraEasyTierBound = true
+        const enhanceTerracotta = () => {
+    const panel = document.getElementById('aurora-easytier-panel')
+    if (!panel || panel.dataset.terracottaReady) return
+    panel.dataset.terracottaReady = '1'
+    const body = panel.querySelector('.modal-body')
+    const head = panel.querySelector('.page-head')
+    if (!body || !head) return
+    const etWrap = document.createElement('div')
+    etWrap.id = 'online-easytier'
+    while (body.firstChild) etWrap.appendChild(body.firstChild)
+    body.appendChild(etWrap)
+    const subtitle = head.querySelector('.titles p')
+    if (subtitle) subtitle.id = 'online-tab-subtitle'
+    const actions = document.createElement('div')
+    actions.className = 'page-actions'
+    actions.style.cssText = 'display:flex;gap:8px'
+    const etTab = document.createElement('button')
+    etTab.className = 'btn btn-sm btn-primary'
+    etTab.id = 'online-tab-et'
+    etTab.textContent = 'EasyTier'
+    const tcTab = document.createElement('button')
+    tcTab.className = 'btn btn-sm btn-soft'
+    tcTab.id = 'online-tab-tc'
+    tcTab.textContent = '陶瓦联机'
+    actions.append(etTab, tcTab)
+    head.appendChild(actions)
+
+    const tc = document.createElement('div')
+    tc.id = 'online-tc'
+    tc.style.display = 'none'
+    tc.innerHTML = [
+      '<div class="card card-pad" style="margin-bottom:14px">',
+      '  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">',
+      '    <span class="badge" id="tc-state">未启动</span>',
+      '    <span id="tc-version" style="color:var(--muted);font-size:12px"></span>',
+      '    <button class="btn btn-sm" id="tc-install">安装 / 更新</button>',
+      '    <button class="btn btn-sm btn-soft" id="tc-stop">退出联机</button>',
+      '  </div>',
+      '  <div class="sub" id="tc-hint" style="margin-top:8px">陶瓦联机与 HMCL 使用同一套房间码，两边可以互相加入。</div>',
+      '</div>',
+      '<div class="card card-pad" style="margin-bottom:14px">',
+      '  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">',
+      '    <button class="btn btn-sm btn-primary" id="tc-host">创建房间</button>',
+      '    <input class="input" id="tc-room" placeholder="房间邀请码（如 U/XXXX-XXXX-XXXX-XXXX）" style="flex:1;min-width:220px" />',
+      '    <button class="btn btn-sm btn-soft" id="tc-join">加入房间</button>',
+      '  </div>',
+      '  <div id="tc-room-box" style="display:none;margin-top:12px;align-items:center;gap:10px;flex-wrap:wrap">',
+      '    <span style="color:var(--muted);font-size:12px">邀请码</span>',
+      '    <code id="tc-room-code" style="font-family:Microsoft YaHei UI, Segoe UI, system-ui, sans-serif;font-size:17px;font-weight:700;letter-spacing:1.5px"></code>',
+      '    <button class="btn btn-sm btn-soft" id="tc-copy">复制</button>',
+      '  </div>',
+      '  <div id="tc-url-box" style="display:none;margin-top:10px;color:var(--muted);font-size:12px"></div>',
+      '  <div id="tc-members" class="sub" style="margin-top:10px"></div>',
+      '  <div style="margin-top:12px"><button class="btn btn-sm btn-soft" id="tc-reset">返回待机</button></div>',
+      '</div>',
+      '<div class="card card-pad"><div class="sub">房主需要先在游戏里对局域网开放，陶瓦会扫描到端口；加入方在多人游戏列表里双击「陶瓦联机大厅」即可进入。</div><div class="sub" style="margin-top:6px;color:var(--faint);font-size:11px">陶瓦联机 Terracotta · by burningtnt · AGPL-3.0</div></div>'
+    ].join('')
+    body.appendChild(tc)
+
+    let timer = null
+    let busy = false
+    const el = (id) => document.getElementById(id)
+    const stateNames = {
+      'not-running': '未启动', waiting: '待机', 'host-scanning': '正在扫描本机 Minecraft 端口',
+      'host-starting': '正在创建房间', 'host-ok': '房间已就绪',
+      'guest-connecting': '正在连接房主', 'guest-starting': '正在加入房间', 'guest-ok': '已加入房间',
+      exception: '联机异常'
+    }
+    const exceptionNames = { 0: '无法连接房主', 1: '与房主的连接中断', 2: '加入方 EasyTier 崩溃', 3: '房主 EasyTier 崩溃', 4: '房主端 Minecraft 服务器失联', 5: '脚手架协议错误' }
+    const render = (state) => {
+      if (!state) return
+      el('tc-state').textContent = stateNames[state.state] || state.state
+      if (state.state === 'host-ok' && state.room) {
+        el('tc-room-box').style.display = 'flex'
+        el('tc-room-code').textContent = state.room
+      } else if (state.state === 'host-starting' && state.room) {
+        el('tc-room-box').style.display = 'flex'
+        el('tc-room-code').textContent = state.room
+      } else {
+        el('tc-room-box').style.display = 'none'
+      }
+      if (state.state === 'guest-ok' && state.url) {
+        el('tc-url-box').style.display = 'block'
+        el('tc-url-box').textContent = '备用直连地址：' + state.url
+      } else {
+        el('tc-url-box').style.display = 'none'
+      }
+      const members = Array.isArray(state.profiles) ? state.profiles : []
+      const box = el('tc-members')
+      if (!members.length) {
+        box.textContent = ''
+      } else {
+        box.innerHTML = '<div style="font-weight:600;margin-bottom:6px">房间成员（' + members.length + '）</div>' +
+          members.map((m) => '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line)">' +
+            '<span style="width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:var(--panel);font-size:11px;font-weight:700">' +
+            String((m.name || '?').slice(0, 1)).toUpperCase() + '</span>' +
+            '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + String(m.name || '匿名') + '</span>' +
+            '<span class="badge" style="font-size:11px">' + (m.kind === 'HOST' ? '房主' : m.kind === 'LOCAL' ? '本机' : '玩家') + '</span>' +
+            '</div>').join('')
+      }
+      if (state.state === 'exception') {
+        el('tc-hint').textContent = exceptionNames[state.type] || '联机异常，请返回待机后重试。'
+      } else if (state.state === 'host-scanning') {
+        el('tc-hint').textContent = '请在游戏内「对局域网开放」，陶瓦扫描到端口后会自动创建房间。'
+      } else {
+        el('tc-hint').textContent = '陶瓦联机与 HMCL 使用同一套房间码，两边可以互相加入。'
+      }
+    }
+    const poll = async () => {
+      if (timer === null) return
+      try { render(await api.terracotta.state()) } catch {}
+    }
+    const ensure = async () => {
+      el('tc-hint').textContent = '正在准备陶瓦联机…'
+      const installed = await api.terracotta.install(false)
+      if (!installed || installed.ok !== true) {
+        el('tc-hint').textContent = installed?.error || '陶瓦联机安装失败'
+        return false
+      }
+      const started = await api.terracotta.start()
+      if (!started || started.ok !== true) {
+        el('tc-hint').textContent = started?.error || '陶瓦联机启动失败'
+        return false
+      }
+      return true
+    }
+    const run = async (action) => {
+      if (busy) return
+      busy = true
+      try {
+        if (!(await ensure())) return
+        await action()
+        await poll()
+      } finally { busy = false }
+    }
+    etTab.onclick = () => {
+      etTab.className = 'btn btn-sm btn-primary'
+      tcTab.className = 'btn btn-sm btn-soft'
+      etWrap.style.display = ''
+      tc.style.display = 'none'
+      if (subtitle) subtitle.textContent = 'EasyTier 虚拟局域网'
+      if (timer) { clearInterval(timer); timer = null }
+    }
+    tcTab.onclick = () => {
+      tcTab.className = 'btn btn-sm btn-primary'
+      etTab.className = 'btn btn-sm btn-soft'
+      etWrap.style.display = 'none'
+      tc.style.display = ''
+      if (subtitle) subtitle.textContent = '陶瓦联机（可与 HMCL 互通）'
+      void run(async () => {})
+      if (!timer) timer = setInterval(poll, 800)
+    }
+    el('tc-install').onclick = () => void run(async () => {
+      el('tc-hint').textContent = '正在检查并下载陶瓦联机，进度显示在控制台…'
+      const result = await api.terracotta.install(false)
+      el('tc-hint').textContent = result?.ok
+        ? '陶瓦联机已就绪，正在启动…'
+        : (result?.error || '安装失败')
+    })
+    el('tc-host').onclick = () => void run(async () => {
+      const account = await api.accounts.active()
+      const player = account?.name || account?.username || '玩家'
+      const result = await api.terracotta.host(player)
+      if (result && result.ok !== true) el('tc-hint').textContent = result.error || '创建房间失败'
+    })
+    el('tc-join').onclick = () => void run(async () => {
+      const room = el('tc-room').value.trim()
+      if (!room) { el('tc-hint').textContent = '请先粘贴房间邀请码'; return }
+      const account = await api.accounts.active()
+      const player = account?.name || account?.username || '玩家'
+      const result = await api.terracotta.join(room, player)
+      if (result && result.ok !== true) el('tc-hint').textContent = '邀请码无效或当前不可加入'
+    })
+    el('tc-copy').onclick = () => {
+      const code = el('tc-room-code').textContent || ''
+      if (!code) return
+      void navigator.clipboard?.writeText(code)
+      el('tc-copy').textContent = '已复制'
+      setTimeout(() => { el('tc-copy').textContent = '复制' }, 1500)
+    }
+    el('tc-reset').onclick = () => void api.terracotta.reset().then(poll)
+    el('tc-stop').onclick = () => void api.terracotta.stop().then(() => { render({ state: 'not-running' }) })
+  }
+  window.addEventListener('aurora-easytier-open', () => { void openPanel(); setTimeout(enhanceTerracotta, 30) })
+        window.addEventListener('aurora-easytier-close', () => closePanel())
       }
       if (!sidebar.dataset.etNavBound) {
         sidebar.dataset.etNavBound = '1'
         sidebar.addEventListener('click', (event) => {
           if (!(event.target instanceof Element)) return
-          if (event.target.closest('#aurora-easytier-nav')) return
           closePanel()
         })
       }
@@ -841,7 +1176,7 @@
     style.id = styleId
     style.textContent = `
       select.select{appearance:none!important;-webkit-appearance:none!important;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")!important;background-position:right 13px center!important;background-repeat:no-repeat!important;background-size:12px!important;padding-right:34px!important;pointer-events:none!important}
-      .aurora-select-menu{position:fixed;z-index:1000;min-width:160px;max-height:300px;overflow:auto;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--panel-solid);box-shadow:0 12px 32px -18px rgba(0,0,0,.55)}
+      .aurora-select-menu{position:fixed;z-index:1000;min-width:0;max-height:300px;overflow:auto;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--panel-solid);box-shadow:0 12px 32px -18px rgba(0,0,0,.55)}
       .aurora-select-option{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:9px 10px;border-radius:7px;text-align:left;font-size:12px;color:var(--text-soft);background:transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .aurora-select-option:hover{background:var(--panel-hover);color:var(--text)}
       .aurora-select-option.active{background:var(--panel-hover);color:var(--text)}
@@ -865,6 +1200,7 @@
     menu.className = 'aurora-select-menu'
     for (const option of options) {
       if (option.disabled) continue
+      if ((option.textContent || '').includes('没有兼容当前实例的版本')) continue
       const row = document.createElement('button')
       row.type = 'button'
       row.className = 'aurora-select-option' + (option.value === select.value ? ' active' : '')
@@ -881,7 +1217,7 @@
     }
     document.body.appendChild(menu)
     const rect = select.getBoundingClientRect()
-    const width = Math.max(rect.width, 160)
+    const width = Math.max(rect.width, 120)
     menu.style.width = Math.min(width, window.innerWidth - 16) + 'px'
     menu.style.left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8) + 'px'
     const height = Math.min(menu.scrollHeight, 300)
@@ -928,5 +1264,14 @@
   document.addEventListener('scroll', (event) => {
     if (menu && event.target instanceof Node && menu.contains(event.target)) return
     close()
+  }, true)
+  document.addEventListener('click', (event) => {
+    const link = event.target instanceof Element ? event.target.closest('a[href]') : null
+    if (!link) return
+    const href = link.getAttribute('href') || ''
+    if (!/^https?:/i.test(href)) return
+    event.preventDefault()
+    event.stopPropagation()
+    void api.app.openExternal(href)
   }, true)
 })()
