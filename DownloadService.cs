@@ -13,8 +13,26 @@ namespace AuroraLauncher
 {
     internal static class DownloadService
     {
-        private const long MultipartMinSize = 4_000_000;
-        private const int MaxSegmentsPerFile = 8;
+        private const long MultipartMinSize = 256_000;
+        private const int MaxSegmentsPerFile = 12;
+        private const int MaxFileConnections = 12;
+        private const long AdaptiveSegmentTarget = 8L * 1024 * 1024;
+        private const long SlowChunkSpeed = 50L * 1024;
+        private const long MinSplitRemaining = 2L * 1024 * 1024;
+        private const int SlowChunkSeconds = 8;
+        private static readonly SemaphoreSlim GlobalConnectionGate = new(64, 64);
+        private const int SegmentChunkSize = 512 * 1024;
+        private static long ChunkSizeFor(long total, bool aggressive)
+        {
+            // 模组/整合包 CDN：单连接限速明显，小文件也拆细。
+            // 游戏本体与加载器：保持原来的 1MB 分段，细分只会增加请求开销。
+            if (!aggressive) return 1024 * 1024;
+            if (total <= 1_000_000) return 64 * 1024;
+            if (total < 8_000_000) return 256 * 1024;
+            if (total < 64_000_000) return 512 * 1024;
+            return 1024 * 1024;
+        }
+
         private static readonly SemaphoreSlim SegmentGate = new(128);
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> FileGates = new(StringComparer.OrdinalIgnoreCase);
 
@@ -54,9 +72,39 @@ namespace AuroraLauncher
                 .Replace("https://mediafilez.forgecdn.net/", "https://mod.mcimirror.top/");
         }
 
+        private static string EngineMode()
+        {
+            try { var value = BridgeService.GetSettings()["downloadEngine"]?.GetValue<string>() ?? "aria2"; if (value == "idm" || value == "aria2") return "hydra";
+                return value; }
+            catch { return "idm"; }
+        }
+
         private static string SourceMode()
         {
             try { return BridgeService.GetSettings()["downloadSource"]?.GetValue<string>() ?? "auto"; }
+            catch { return "auto"; }
+        }
+
+        private static string CategoryFor(string url)
+        {
+            if (url.Contains("minecraftforge.net", StringComparison.OrdinalIgnoreCase)) return "forge";
+            if (url.Contains("neoforged.net", StringComparison.OrdinalIgnoreCase)) return "neoforge";
+            if (url.Contains("fabricmc.net", StringComparison.OrdinalIgnoreCase)) return "fabric";
+            if (url.Contains("quiltmc.org", StringComparison.OrdinalIgnoreCase)) return "quilt";
+            return "vanilla";
+        }
+
+        private static string SourceModeFor(string url)
+        {
+            try
+            {
+                var settings = BridgeService.GetSettings();
+                var category = CategoryFor(url);
+                var perCategory = settings["downloadSources"]?[category]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(perCategory))
+                    return perCategory!;
+                return settings["downloadSource"]?.GetValue<string>() ?? "auto";
+            }
             catch { return "auto"; }
         }
 
@@ -72,15 +120,28 @@ namespace AuroraLauncher
                 || url.StartsWith("https://files.minecraftforge.net/maven/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.neoforged.net/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.fabricmc.net/", StringComparison.OrdinalIgnoreCase)
-                || url.StartsWith("https://maven.quiltmc.org/", StringComparison.OrdinalIgnoreCase);
+                || url.StartsWith("https://maven.quiltmc.org/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://cdn.modrinth.com/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://api.modrinth.com/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Modrinth / CurseForge CDN files use their own segmented single-source
+        // downloader; multi-source aggregation is reserved for Mojang/loader files.
+        private static bool IsContentCdn(string url)
+        {
+            return url.StartsWith("https://cdn.modrinth.com/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://edge.forgecdn.net/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://mediafilez.forgecdn.net/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://media.forgecdn.net/", StringComparison.OrdinalIgnoreCase);
         }
 
         // Same ordering as the old launcher's candidates().
         private static string[] Candidates(string url)
         {
+            if (IsContentCdn(url)) return new[] { url };
             var mirror = Mirror(url);
             var list = new List<string>();
-            var source = SourceMode();
+            var source = SourceModeFor(url);
             if (source == "official") list.Add(url);
             else if (source == "mirror")
             {
@@ -102,7 +163,7 @@ namespace AuroraLauncher
 
         public static async Task<string> GetText(string url, CancellationToken token = default)
         {
-            Exception? last = null;
+            var last = new Exception("网络请求失败");
             for (var attempt = 0; attempt <= 2; attempt++)
             {
                 foreach (var candidate in Candidates(url))
@@ -110,7 +171,7 @@ namespace AuroraLauncher
                     try
                     {
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                        timeout.CancelAfter(TimeSpan.FromSeconds(8));
                         using var request = new HttpRequestMessage(HttpMethod.Get, candidate);
                         request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
                         request.Headers.Accept.ParseAdd("application/json");
@@ -123,9 +184,9 @@ namespace AuroraLauncher
                         last = ex;
                     }
                 }
-                if (attempt < 2) await Task.Delay(500 * (attempt + 1), token);
+                if (attempt < 2) await Task.Delay(400 * (attempt + 1), token);
             }
-            throw last ?? new Exception("网络请求失败");
+            throw last;
         }
 
         public static async Task<string> GetTextOfficial(string url, CancellationToken token = default)
@@ -152,43 +213,114 @@ namespace AuroraLauncher
         {
             if (File.Exists(destination))
             {
-                if (string.IsNullOrEmpty(sha1) || CheckSha1(destination, sha1))
-                {
-                    if (size <= 0 || new FileInfo(destination).Length == size) return;
-                }
+                var existing = new FileInfo(destination).Length;
+                if (!string.IsNullOrEmpty(sha1) && CheckSha1(destination, sha1)) return;
+                if (size > 0 && existing == size) return;
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            if (EngineMode() == "hydra" || EngineMode() == "aria2")
+            {
+                foreach (var ariaUrl in Candidates(url))
+                {
+                    try
+                    {
+                        if (await ProbeRange(ariaUrl, token) <= 0) continue;
+                        await HydraService.DownloadAsync(ariaUrl, destination, size, onProgress, token);
+                        if (!string.IsNullOrEmpty(sha1) && !CheckSha1(destination, sha1))
+                            throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
+                        if (size > 0 && new FileInfo(destination).Length != size)
+                            throw new Exception("文件大小不匹配：" + Path.GetFileName(destination));
+                        try { if (File.Exists(destination + ".aria2")) File.Delete(destination + ".aria2"); } catch { }
+                        return;
+                    }
+                    catch { }
+                }
+            }
             var candidates = Candidates(url);
+            var contentCdn = IsContentCdn(url);
+            var minMultipart = contentCdn ? MultipartMinSize : 4_000_000;
             Exception? last = null;
             for (var attempt = 0; attempt <= 2; attempt++)
             {
                 foreach (var candidate in candidates)
                 {
+                    string candidateHost;
+                    try { candidateHost = new Uri(candidate).Host; } catch { candidateHost = ""; }
+                    if (attempt < 2 && candidateHost.Length > 0
+                        && SlowHosts.TryGetValue(candidateHost, out var slowUntil) && slowUntil > DateTime.UtcNow)
+                        continue;
                     var temp = destination + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
                     try
                     {
                         var total = size;
-                        if (total < MultipartMinSize)
+                        if (total < minMultipart && candidates.Length < 2)
                         {
                             var probed = await ProbeRange(candidate, token);
-                            if (probed >= MultipartMinSize) total = probed;
+                            if (probed >= minMultipart) total = probed;
                         }
-                        if (total >= MultipartMinSize &&
-                            await DownloadMultipart(candidate, temp, total, token, onProgress))
+                        if (total > 0 && total < minMultipart && candidates.Length >= 2 && EngineMode() != "normal")
+                        {
+                            var (smallHealthy, smallTotal) = await HealthySources(candidates, token);
+                            if (smallTotal > 0) total = smallTotal;
+                            if (smallHealthy.Length >= 2 &&
+                                await DownloadMultipartMulti(smallHealthy, temp, total, token, onProgress, contentCdn))
+                            {
+                                if (!string.IsNullOrEmpty(sha1) && !CheckSha1(temp, sha1))
+                                    throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
+                                if (size > 0 && new FileInfo(temp).Length != size)
+                                    throw new Exception("文件大小不匹配：" + Path.GetFileName(destination));
+                                MoveIntoPlace(temp, destination);
+                                return;
+                            }
+                        }
+                        var multipart = false;
+                        if (total >= minMultipart && EngineMode() != "normal")
+                        {
+                            if (candidates.Length == 1)
+                            {
+                                // 单一 CDN 地址：按主机缓存 Range 支持情况。
+                                // 部分 CDN（如 forgecdn 的部分节点）对 Range 返回 404，
+                                // 强行分段只会白等重试，直接单连接更快。
+                                var host = new Uri(candidates[0]).Host;
+                                if (!RangeSupport.TryGetValue(host, out var supportsRange))
+                                {
+                                    supportsRange = await ProbeRange(candidates[0], token) > 0;
+                                    RangeSupport[host] = supportsRange;
+                                }
+                                if (supportsRange)
+                                    multipart = await DownloadMultipart(candidates[0], temp, total, token, onProgress, contentCdn);
+                            }
+                            else
+                            {
+                                var (healthy, probedTotal) = await HealthySources(candidates, token);
+                                if (probedTotal >= minMultipart && total < minMultipart) total = probedTotal;
+                                if (healthy.Length >= 2)
+                                    multipart = await DownloadMultipartMulti(healthy, temp, total, token, onProgress, contentCdn);
+                                else if (healthy.Length == 1)
+                                    multipart = await DownloadMultipart(healthy[0], temp, total, token, onProgress, contentCdn);
+                            }
+                        }
+                        if (multipart)
                         {
                             if (!string.IsNullOrEmpty(sha1) && !CheckSha1(temp, sha1))
                                 throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
                             MoveIntoPlace(temp, destination);
                             return;
                         }
-                        await DownloadOnce(candidate, temp, size, token, onProgress);
+                        await DownloadOnce(candidate, temp, size, token, onProgress, attempt == 2);
                         if (!string.IsNullOrEmpty(sha1) && !CheckSha1(temp, sha1))
                             throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
                         if (size > 0 && new FileInfo(temp).Length != size)
                             throw new Exception("文件大小不匹配：" + Path.GetFileName(destination));
                         MoveIntoPlace(temp, destination);
                         return;
+                    }
+                    catch (SlowSourceException slow)
+                    {
+                        last = slow;
+                        if (candidateHost.Length > 0) SlowHosts[candidateHost] = DateTime.UtcNow.AddMinutes(5);
+                        try { if (File.Exists(temp)) File.Delete(temp); } catch { }
                     }
                     catch (Exception ex)
                     {
@@ -198,6 +330,7 @@ namespace AuroraLauncher
                 }
                 if (attempt < 2) await Task.Delay(500 * (attempt + 1), token);
             }
+            try { if (File.Exists(destination + ".aria2part")) File.Delete(destination + ".aria2part"); if (File.Exists(destination + ".aria2part.aria2")) File.Delete(destination + ".aria2part.aria2"); } catch { }
             throw new Exception($"下载失败 {Path.GetFileName(destination)}: {last?.Message}", last);
         }
 
@@ -207,7 +340,7 @@ namespace AuroraLauncher
             File.Move(temp, destination);
         }
 
-        private static async Task DownloadOnce(string url, string part, long size, CancellationToken token, Action<long, long>? onProgress)
+        private static async Task DownloadOnce(string url, string part, long size, CancellationToken token, Action<long, long>? onProgress, bool allowSlow = true)
         {
             using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             headerTimeout.CancelAfter(TimeSpan.FromSeconds(30));
@@ -219,6 +352,7 @@ namespace AuroraLauncher
             var contentLength = response.Content.Headers.ContentLength ?? 0;
             var total = size > 0 ? size : contentLength;
             long received = 0;
+            var started = DateTime.UtcNow;
             var lastEmit = DateTime.UtcNow;
             await using (var input = await response.Content.ReadAsStreamAsync(token))
             await using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
@@ -227,11 +361,21 @@ namespace AuroraLauncher
                 while (true)
                 {
                     using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    readTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+                    readTimeout.CancelAfter(TimeSpan.FromSeconds(20));
                     var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), readTimeout.Token);
                     if (read <= 0) break;
                     await output.WriteAsync(buffer.AsMemory(0, read), CancellationToken.None);
                     received += read;
+                    if (!allowSlow && total > 1_500_000)
+                    {
+                        var elapsed = (DateTime.UtcNow - started).TotalSeconds;
+                        // 单连接慢于 25 KB/s 就判定这个源不可用，交给外层换源；
+                        // 最后一次尝试不再打断，保证仍能下载完成。
+                        if (elapsed > 8 && received < elapsed * 50_000)
+                            throw new SlowSourceException($"下载源过慢（{received / 1024} KB / {elapsed:0} 秒）");
+                        if (elapsed > Math.Max(45, total / 50_000.0))
+                            throw new SlowSourceException($"下载源超时（{received / 1024} KB / {elapsed:0} 秒）");
+                    }
                     if ((DateTime.UtcNow - lastEmit).TotalMilliseconds > 120)
                     {
                         lastEmit = DateTime.UtcNow;
@@ -261,71 +405,192 @@ namespace AuroraLauncher
             catch { return 0; }
         }
 
-        private static async Task<bool> DownloadMultipart(string url, string part, long total, CancellationToken token, Action<long, long>? onProgress)
+        private static readonly ConcurrentDictionary<string, DateTime> DeadSources = new();
+        private static readonly ConcurrentDictionary<string, DateTime> SlowHosts = new();
+        private static readonly ConcurrentDictionary<string, bool> RangeSupport = new(StringComparer.OrdinalIgnoreCase);
+
+        private static async Task<(string[] Urls, long Total)> HealthySources(string[] candidates, CancellationToken token)
         {
-            var count = Math.Max(1, Math.Min(MaxSegmentsPerFile, (int)Math.Ceiling(total / (8d * 1024 * 1024))));
-            if (count < 2) return false;
-            var chunk = (long)Math.Ceiling(total / (double)count);
-            var segments = Enumerable.Range(0, count).Select(i => new
+            var healthy = new List<string>();
+            long total = 0;
+            foreach (var candidate in candidates)
             {
-                Index = i,
-                Start = i * chunk,
-                End = i == count - 1 ? total - 1 : Math.Min(total - 1, (i + 1) * chunk - 1),
-                File = $"{part}.{i}"
-            }).ToArray();
-            long received = 0;
-            try
-            {
-                var tasks = segments.Select(async segment =>
+                if (DeadSources.TryGetValue(candidate, out var until) && until > DateTime.UtcNow) continue;
+                try
                 {
-                    await SegmentGate.WaitAsync(token);
-                    try
+                    using var probeTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    probeTimeout.CancelAfter(TimeSpan.FromSeconds(4));
+                    var length = await ProbeRange(candidate, probeTimeout.Token);
+                    if (length > 0)
                     {
-                        for (var attempt = 0; attempt < 3; attempt++)
-                        {
-                            try
-                            {
-                                long segmentReceived = 0;
-                                var written = await DownloadSegment(url, segment.File, segment.Start, segment.End, token, bytes =>
-                                {
-                                    var delta = bytes - segmentReceived;
-                                    if (delta <= 0) return;
-                                    segmentReceived = bytes;
-                                    onProgress?.Invoke(Math.Min(total, Interlocked.Add(ref received, delta)), total);
-                                });
-                                if (written != segment.End - segment.Start + 1) throw new Exception("分段大小不匹配");
-                                return;
-                            }
-                            catch when (attempt < 2) { await Task.Delay(300 * (attempt + 1), token); }
-                        }
-                        throw new Exception("分段下载失败");
-                    }
-                    finally { SegmentGate.Release(); }
-                });
-                await Task.WhenAll(tasks);
-                using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    foreach (var segment in segments)
-                    {
-                        await using var input = new FileStream(segment.File, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        await input.CopyToAsync(output, token);
+                        healthy.Add(candidate);
+                        DeadSources.TryRemove(candidate, out _);
+                        total = Math.Max(total, length);
                     }
                 }
-                if (new FileInfo(part).Length != total) throw new Exception("合并后的文件大小不匹配");
-                onProgress?.Invoke(total, total);
-                return true;
+                catch
+                {
+                    DeadSources[candidate] = DateTime.UtcNow.AddMinutes(5);
+                }
             }
-            finally
+            return (healthy.ToArray(), total);
+        }
+
+        /// <summary>
+        /// Split the file across every healthy source at the same time. Segments are
+        /// assigned round-robin and a failed segment retries on the next source, so
+        /// one dead/slow mirror no longer stalls the whole download.
+        /// </summary>
+        private static async Task<bool> DownloadMultipartMulti(string[] urls, string part, long total, CancellationToken token, Action<long, long>? onProgress, bool aggressive = true)
+            => await DownloadAdaptiveRange(urls, part, total, token, onProgress, aggressive);
+
+        private static async Task<bool> DownloadMultipart(string url, string part, long total, CancellationToken token, Action<long, long>? onProgress, bool aggressive = true)
+            => await DownloadAdaptiveRange(new[] { url }, part, total, token, onProgress, aggressive);
+
+        private sealed class RangeChunk
+        {
+            public long Start;
+            public long End;
+        }
+
+        private sealed class RangeUnsupportedException : Exception
+        {
+            public RangeUnsupportedException() : base("下载源不支持 Range") { }
+        }
+
+        // 按 PCL 的思路：8MB 起步分段、单文件最多 12 条连接、全局最多 64 条连接，
+        // 慢段不换源而是把剩余部分再对半拆开。
+        private static async Task<bool> DownloadAdaptiveRange(string[] urls, string part, long total,
+            CancellationToken token, Action<long, long>? onProgress, bool aggressive)
+        {
+            if (urls.Length == 0 || total <= 0) return false;
+            var target = aggressive ? ChunkSizeFor(total, true) : AdaptiveSegmentTarget;
+            var count = (int)Math.Min(MaxFileConnections, Math.Max(1L, (long)Math.Ceiling(total / (double)target)));
+            var size = (long)Math.Ceiling(total / (double)count);
+            var queue = new ConcurrentQueue<RangeChunk>();
+            for (long start = 0; start < total; start += size)
+                queue.Enqueue(new RangeChunk { Start = start, End = Math.Min(total, start + size) - 1 });
+
+            long received = 0;
+            long lastReport = Environment.TickCount64;
+            void Report(bool force)
             {
-                foreach (var segment in segments)
-                    try { File.Delete(segment.File); } catch { }
+                var now = Environment.TickCount64;
+                if (!force && now - lastReport < 120) return;
+                lastReport = now;
+                onProgress?.Invoke(Interlocked.Read(ref received), total);
+            }
+
+            try
+            {
+                await using var stream = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.Read,
+                    65536, FileOptions.Asynchronous | FileOptions.RandomAccess);
+                stream.SetLength(total);
+                var handle = stream.SafeFileHandle;
+                var workers = Enumerable.Range(0, count).Select(_ => Task.Run(async () =>
+                {
+                    while (queue.TryDequeue(out var chunk))
+                    {
+                        await DownloadChunkAsync(urls, handle, queue, chunk, token, addBytes =>
+                        {
+                            Interlocked.Add(ref received, addBytes);
+                            Report(false);
+                        });
+                    }
+                }, token)).ToArray();
+                await Task.WhenAll(workers);
+                await stream.FlushAsync();
+            }
+            catch (RangeUnsupportedException)
+            {
+                return false;
+            }
+            Report(true);
+            if (Interlocked.Read(ref received) < total)
+                throw new Exception("分段下载未完成");
+            return true;
+        }
+
+        private static async Task DownloadChunkAsync(string[] urls, Microsoft.Win32.SafeHandles.SafeFileHandle handle,
+            ConcurrentQueue<RangeChunk> queue, RangeChunk chunk, CancellationToken token, Action<long> addBytes)
+        {
+            var position = chunk.Start;
+            var attempt = 0;
+            while (position <= chunk.End)
+            {
+                var url = urls[attempt % urls.Length];
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                long requestBytes = 0;
+                var requestStart = position;
+                try
+                {
+                    await GlobalConnectionGate.WaitAsync(token);
+                    try
+                    {
+                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                        request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+                        request.Headers.AcceptEncoding.ParseAdd("identity");
+                        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(position, chunk.End);
+                        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                        if (response.StatusCode != System.Net.HttpStatusCode.PartialContent)
+                            throw new RangeUnsupportedException();
+                        await using var input = await response.Content.ReadAsStreamAsync(token);
+                        var buffer = new byte[81920];
+                        while (position <= chunk.End)
+                        {
+                            using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            readTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+                            var want = (int)Math.Min(buffer.Length, chunk.End - position + 1);
+                            var read = await input.ReadAsync(buffer.AsMemory(0, want), readTimeout.Token);
+                            if (read <= 0) break;
+                            await RandomAccess.WriteAsync(handle, buffer.AsMemory(0, read), position, token);
+                            position += read;
+                            requestBytes += read;
+                            addBytes(read);
+                            var elapsed = stopwatch.Elapsed.TotalSeconds;
+                            if (elapsed >= SlowChunkSeconds && requestBytes / elapsed < SlowChunkSpeed)
+                            {
+                                var remaining = chunk.End - position + 1;
+                                if (remaining >= MinSplitRemaining)
+                                {
+                                    var half = remaining / 2;
+                                    queue.Enqueue(new RangeChunk { Start = position, End = position + half - 1 });
+                                    queue.Enqueue(new RangeChunk { Start = position + half, End = chunk.End });
+                                    return;
+                                }
+                            }
+                        }
+                        if (position <= chunk.End && position == requestStart)
+                            throw new Exception("分段下载无进展");
+                    }
+                    finally
+                    {
+                        GlobalConnectionGate.Release();
+                    }
+                }
+                catch (RangeUnsupportedException)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    if (attempt >= 2) throw;
+                    attempt++;
+                    await Task.Delay(300 * attempt, token);
+                }
             }
         }
 
         private static async Task<long> DownloadSegment(string url, string file, long start, long end, CancellationToken token, Action<long>? onProgress = null)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(60));
+            timeout.CancelAfter(TimeSpan.FromSeconds(300));
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
             request.Headers.AcceptEncoding.ParseAdd("identity");
@@ -338,16 +603,25 @@ namespace AuroraLauncher
             await using (var output = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
             {
                 var buffer = new byte[81920];
+                long reported = 0;
+                var lastTick = Environment.TickCount64;
                 while (true)
                 {
                     using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
-                    readTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+                    readTimeout.CancelAfter(TimeSpan.FromSeconds(20));
                     var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), readTimeout.Token);
                     if (read <= 0) break;
                     await output.WriteAsync(buffer.AsMemory(0, read), CancellationToken.None);
                     received += read;
-                    onProgress?.Invoke(received);
+                    var now = Environment.TickCount64;
+                    if (received - reported >= 131072 || now - lastTick >= 200)
+                    {
+                        reported = received;
+                        lastTick = now;
+                        onProgress?.Invoke(received);
+                    }
                 }
+                onProgress?.Invoke(received);
             }
             return received;
         }
@@ -364,5 +638,10 @@ namespace AuroraLauncher
             }
             catch { return false; }
         }
+    }
+
+    internal sealed class SlowSourceException : Exception
+    {
+        public SlowSourceException(string message) : base(message) { }
     }
 }

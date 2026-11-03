@@ -16,6 +16,11 @@ namespace AuroraLauncher
         private static readonly object Gate = new();
         private static Process? _process;
         private static JsonObject _state = new JsonObject { ["state"] = "idle" };
+        private static System.Threading.CancellationTokenSource? _logWatch;
+        private static volatile bool _suppressLogs;
+        private static long _startedAtMs;
+        private static string _runningInstanceId = "";
+        private static string? _lastLogPath;
 
         public static JsonObject State()
         {
@@ -306,6 +311,7 @@ namespace AuroraLauncher
                         : $"未找到满足 Java {requiredJava} 或更高版本的运行环境");
                 if (!File.Exists(java)) throw new Exception("Java 路径不存在：" + java);
                 ProgressService.Step("检查游戏文件", 1, "客户端与依赖库");
+                await EnsureClientJar(version, versionId, System.Threading.CancellationToken.None);
                 var classpath = BuildClasspath(version, gameDir, out var nativesDir);
                 ProgressService.Update(1, "游戏文件已检查");
                 EmitLauncher($"启动 {versionId}，Java：{java}");
@@ -313,12 +319,6 @@ namespace AuroraLauncher
                 ProgressService.Step("检查资源文件", 1, assetsIndex);
                 await MinecraftInstallService.EnsureAssets(version);
                 ProgressService.Update(1, "资源文件已就绪");
-                {
-                    var skinStep = ProgressService.Step("皮肤与披风", 1, "检查客户端补丁");
-                    await TransparentCapesPatchService.Ensure(instance, versionId, account,
-                        System.Threading.CancellationToken.None);
-                    ProgressService.UpdateAt(skinStep, 1, "已就绪");
-                }
                 var memory = instance["memory"]?.GetValue<int>() ?? (settings["defaultMemory"]?.GetValue<int>() ?? 0);
                 if (memory <= 0)
                 {
@@ -356,7 +356,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "1.3.3",
+                    ["${launcher_version}"] = "2.0.0.0",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -388,7 +388,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=1.3.3");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.0.0.0");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
@@ -414,7 +414,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=1.3.3");
+                args.Add("-Dminecraft.launcher.version=2.0.0.0");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
@@ -505,9 +505,12 @@ namespace AuroraLauncher
                 process.Start();
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
+                _suppressLogs = false;
                 StartLogWatcher(gameDir, process);
 
 
+                _startedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _runningInstanceId = instanceId;
                 lock (Gate)
                 {
                     _process = process;
@@ -521,6 +524,18 @@ namespace AuroraLauncher
                     };
                 }
                 GameEvents.Emit("game", State());
+                try
+                {
+                    var instanceFile = Path.Combine(AppPaths.InstancesDir, instanceId, "instance.json");
+                    if (File.Exists(instanceFile) && JsonNode.Parse(File.ReadAllText(instanceFile)) is JsonObject record)
+                    {
+                        record["playCount"] = (record["playCount"]?.GetValue<int>() ?? 0) + 1;
+                        record["lastPlayedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        File.WriteAllText(instanceFile, record.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                        GameEvents.Emit("instances", BridgeService.ListInstances());
+                    }
+                }
+                catch { }
                 return new JsonObject { ["ok"] = true, ["pid"] = process.Id };
             }
             catch (Exception ex)
@@ -535,32 +550,79 @@ namespace AuroraLauncher
 
         public static void Stop()
         {
+            Process? process;
+            lock (Gate) process = _process;
+            try { _logWatch?.Cancel(); } catch { }
+            FlushTail(20);
+            _suppressLogs = true;
+            // Reset the UI first: users expect the stop button and the log panel
+            // to react immediately even if the JVM takes a while to die.
             lock (Gate)
             {
-                try
-                {
-                    if (_process != null && !_process.HasExited) _process.Kill(true);
-                }
-                catch { }
+                _process = null;
+                _state = new JsonObject { ["state"] = "idle" };
             }
+            GameEvents.Emit("game", State());
+            try
+            {
+                if (process != null && !process.HasExited) process.Kill(true);
+            }
+            catch { }
+            try { process?.WaitForExit(2000); } catch { }
+            GameEvents.Emit("game", State());
+        }
+
+        private static void FlushTail(int maxLines)
+        {
+            var path = _lastLogPath;
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                if (!File.Exists(path)) return;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var start = Math.Max(0, stream.Length - 64 * 1024);
+                stream.Seek(start, SeekOrigin.Begin);
+                using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+                var text = reader.ReadToEnd();
+                var lines = text.Split('\n').Select(line => line.TrimEnd('\r')).Where(line => line.Length > 0).ToList();
+                if (lines.Count == 0) return;
+                if (lines.Count > maxLines) lines = lines.Skip(lines.Count - maxLines).ToList();
+                var batch = new JsonArray();
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                foreach (var line in lines)
+                {
+                    var level = line.Contains("[ERROR]") || line.Contains("Exception") ? "error" : line.Contains("[WARN]") ? "warning" : "info";
+                    batch.Add(new JsonObject { ["ts"] = now, ["source"] = "game", ["level"] = level, ["text"] = line });
+                }
+                GameEvents.Emit("logs", batch);
+            }
+            catch { }
         }
 
         private static void StartLogWatcher(string gameDir, Process process, string? outputFile = null)
         {
             var logFile = Path.Combine(gameDir, "logs", "latest.log");
+            _lastLogPath = logFile;
+            try { _logWatch?.Cancel(); } catch { }
+            var cts = new System.Threading.CancellationTokenSource();
+            _logWatch = cts;
             _ = Task.Run(async () =>
             {
+                var token = cts.Token;
                 long offset = File.Exists(logFile) ? new FileInfo(logFile).Length : 0;
                 long outOffset = outputFile != null && File.Exists(outputFile) ? new FileInfo(outputFile).Length : 0;
-                while (!process.HasExited)
+                while (!token.IsCancellationRequested && !process.HasExited)
                 {
                     TryRead(logFile, ref offset);
                     if (outputFile != null) TryRead(outputFile, ref outOffset);
-                    await Task.Delay(350);
+                    try { await Task.Delay(150, token); } catch { break; }
                 }
-                TryRead(logFile, ref offset);
-                if (outputFile != null) TryRead(outputFile, ref outOffset);
-            });
+                if (!token.IsCancellationRequested)
+                {
+                    TryRead(logFile, ref offset);
+                    if (outputFile != null) TryRead(outputFile, ref outOffset);
+                }
+            }, cts.Token);
         }
 
         private static void TryRead(string path, ref long offset)
@@ -575,13 +637,21 @@ namespace AuroraLauncher
                 using var reader = new StreamReader(stream, Encoding.UTF8);
                 var text = reader.ReadToEnd();
                 offset = stream.Position;
+                var batch = new JsonArray();
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 foreach (var line in text.Split('\n'))
                 {
                     var clean = line.TrimEnd('\r');
                     if (clean.Length == 0) continue;
                     var level = clean.Contains("[ERROR]") || clean.Contains("Exception") ? "error" : clean.Contains("[WARN]") ? "warning" : "info";
-                    EmitLog(level, clean);
+                    batch.Add(new JsonObject { ["ts"] = now, ["source"] = "game", ["level"] = level, ["text"] = clean });
                 }
+                // One WebView2 message per read instead of one per line: a burst of
+                // startup lines used to queue hundreds of Dispatcher callbacks and
+                // the console kept scrolling long after the game had exited.
+                if (_suppressLogs) return;
+                while (batch.Count > 200) batch.RemoveAt(0);
+                if (batch.Count > 0) GameEvents.Emit("logs", batch);
             }
             catch { }
         }
@@ -593,6 +663,9 @@ namespace AuroraLauncher
 
         private static void OnExited(Process process)
         {
+            try { _logWatch?.Cancel(); } catch { }
+            FlushTail(20);
+            _suppressLogs = true;
             var code = process.ExitCode;
             lock (Gate)
             {
@@ -607,7 +680,27 @@ namespace AuroraLauncher
                 _process = null;
             }
             EmitLog("error", $"游戏进程退出，代码 {code}");
+            AddPlayTime(_runningInstanceId, _startedAtMs);
+            _startedAtMs = 0;
+            _runningInstanceId = "";
             GameEvents.Emit("game", State());
+        }
+
+        private static void AddPlayTime(string instanceId, long startedAtMs)
+        {
+            if (string.IsNullOrWhiteSpace(instanceId) || startedAtMs <= 0) return;
+            var elapsed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtMs;
+            if (elapsed < 1000) return;
+            try
+            {
+                var file = Path.Combine(AppPaths.InstancesDir, instanceId, "instance.json");
+                if (!File.Exists(file)) return;
+                if (JsonNode.Parse(File.ReadAllText(file)) is not JsonObject record) return;
+                record["totalPlayTimeMs"] = (record["totalPlayTimeMs"]?.GetValue<long>() ?? 0) + elapsed;
+                File.WriteAllText(file, record.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                GameEvents.Emit("instances", BridgeService.ListInstances());
+            }
+            catch { }
         }
 
         private static void EmitLauncher(string text)
@@ -753,6 +846,37 @@ namespace AuroraLauncher
             return 0;
         }
 
+        private static async Task EnsureClientJar(JsonObject version, string versionId, System.Threading.CancellationToken token)
+        {
+            if (HasSrgClient(version)) return;
+            var bootstrap = (version["mainClass"]?.GetValue<string>() ?? "")
+                .Contains("cpw.mods.bootstraplauncher", StringComparison.OrdinalIgnoreCase);
+            var directory = Path.Combine(AppPaths.RootDir, "versions", versionId);
+            var jar = Path.Combine(directory, versionId + ".jar");
+            if (File.Exists(jar) && new FileInfo(jar).Length > 0) return;
+            var client = version["downloads"]?["client"] as JsonObject;
+            var url = client?["url"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(url)) return;
+            Directory.CreateDirectory(directory);
+            // PCL materialises the version folder on launch: <version>/<version>.jar
+            // plus the JSON. For BootstrapLauncher versions the jar is only a record
+            // and must NOT be added to the classpath (that caused the Forge crash).
+            EmitLauncher((bootstrap ? "正在生成版本目录客户端文件：" : "客户端核心文件缺失，正在下载：") + versionId);
+            await DownloadService.Download(url, jar, client?["sha1"]?.GetValue<string>(),
+                client?["size"]?.GetValue<long>() ?? 0, token);
+        }
+
+        private static bool HasSrgClient(JsonObject version)
+        {
+            if (version["libraries"] is not JsonArray libraries) return false;
+            foreach (var item in libraries.OfType<JsonObject>())
+            {
+                var name = item["name"]?.GetValue<string>() ?? "";
+                if (name.StartsWith("net.minecraft:client:", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
         private static string BuildClasspath(JsonObject version, string gameDir, out string nativesDir)
         {
             var librariesDir = Path.Combine(AppPaths.RootDir, "libraries");
@@ -781,8 +905,16 @@ namespace AuroraLauncher
                 return parts.Length >= 3 ? parts[2] : "";
             }
             var clientJar = FindClientJar(version["id"]?.GetValue<string>() ?? "");
-            nativesDir = Path.Combine(AppPaths.RootDir, "natives", "shared");
+            // PCL keeps natives inside the version folder: versions/<id>/<id>-natives.
+            var versionFolder = version["id"]?.GetValue<string>() ?? "shared";
+            nativesDir = Path.Combine(AppPaths.RootDir, "versions", versionFolder, versionFolder + "-natives");
             Directory.CreateDirectory(nativesDir);
+            try
+            {
+                var legacyNatives = Path.Combine(AppPaths.RootDir, "versions", versionFolder + "-natives");
+                if (Directory.Exists(legacyNatives)) Directory.Delete(legacyNatives, true);
+            }
+            catch { }
 
             if (version["libraries"] is JsonArray libraries)
             {
@@ -811,27 +943,56 @@ namespace AuroraLauncher
                             var full = Path.Combine(librariesDir, nativePath.GetValue<string>().Replace('/', Path.DirectorySeparatorChar));
                             if (File.Exists(full))
                             {
-                                try { ZipFile.ExtractToDirectory(full, nativesDir, true); } catch { }
+                                try
+                                {
+                                    using var zip = ZipFile.OpenRead(full);
+                                    foreach (var entry in zip.Entries)
+                                    {
+                                        if (!entry.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+                                        var destination = Path.Combine(nativesDir, entry.Name);
+                                        entry.ExtractToFile(destination, true);
+                                    }
+                                }
+                                catch { }
                             }
                         }
                     }
                 }
             }
             var classpath = entries.Select(entry => entry.Full).ToList();
-            // Old launcher appends the vanilla client jar after every library.
+            // PCL keeps the instance jar at the very end of the classpath so
+            // OptiFine's patcher can read obfuscated vanilla classes. The
+            // OptiFine library itself belongs second-to-last.
             var versionId = version["id"]?.GetValue<string>() ?? "";
-            var ownJar = Path.Combine(AppPaths.RootDir, "versions", versionId, versionId + ".jar");
-            var inheritedJar = !File.Exists(ownJar);
-            var mainClass = version["mainClass"]?.GetValue<string>() ?? "";
-            var patchedModule = mainClass.Contains("cpw.mods.bootstraplauncher", StringComparison.OrdinalIgnoreCase);
-            if (clientJar != null && (!patchedModule || !inheritedJar)) classpath.Add(clientJar);
+            var optiFineIndex = -1;
+            for (var i = 0; i < classpath.Count; i++)
+            {
+                if (classpath[i].Replace('\\', '/').Contains("/optifine/OptiFine/", StringComparison.OrdinalIgnoreCase))
+                {
+                    optiFineIndex = i;
+                    break;
+                }
+            }
+            string? optiFineEntry = null;
+            if (optiFineIndex >= 0)
+            {
+                optiFineEntry = classpath[optiFineIndex];
+                classpath.RemoveAt(optiFineIndex);
+            }
+            if (optiFineEntry != null)
+                classpath.Insert(Math.Max(0, classpath.Count - 1), optiFineEntry);
+            if (clientJar != null) classpath.Add(clientJar);
+            EmitLauncher($"启动 classpath：{classpath.Count} 项，实例 jar：{(clientJar != null ? "有" : "无")}，natives：{nativesDir}");
             return string.Join(Path.PathSeparator, classpath);
         }
 
         internal static string? FindClientJar(string versionId)
+            => FindClientJarFrom(Path.Combine(AppPaths.RootDir, "versions"), versionId);
+
+        internal static string? FindClientJarFrom(string versionsRoot, string versionId)
         {
             if (string.IsNullOrWhiteSpace(versionId)) return null;
-            var directory = Path.Combine(AppPaths.RootDir, "versions", versionId);
+            var directory = Path.Combine(versionsRoot, versionId);
             var jar = Path.Combine(directory, versionId + ".jar");
             if (File.Exists(jar)) return jar;
             var jsonFile = Path.Combine(directory, versionId + ".json");
@@ -840,9 +1001,34 @@ namespace AuroraLauncher
             {
                 var json = JsonNode.Parse(File.ReadAllText(jsonFile)) as JsonObject;
                 var parent = json?["inheritsFrom"]?.GetValue<string>();
-                return string.IsNullOrWhiteSpace(parent) ? null : FindClientJar(parent!);
+                return string.IsNullOrWhiteSpace(parent) ? null : FindClientJarFrom(versionsRoot, parent!);
             }
             catch { return null; }
+        }
+
+
+        private static void RepairBrokenLegacyForge(JsonObject version)
+        {
+            if (!string.Equals(version["mainClass"]?.GetValue<string>(), "net.minecraft.launchwrapper.Launch", StringComparison.Ordinal)
+                || version["minecraftArguments"] is not JsonValue launchArgs
+                || !launchArgs.TryGetValue<string>(out var args)
+                || !args.Contains("FMLTweaker", StringComparison.OrdinalIgnoreCase))
+                return;
+            var hasForgeLibrary = (version["libraries"] as JsonArray)?.OfType<JsonObject>().Any(item =>
+            {
+                var name = item["name"]?.GetValue<string>() ?? "";
+                return name.Contains("forge", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains(":fml:", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("minecraftforge", StringComparison.OrdinalIgnoreCase);
+            }) == true;
+            if (hasForgeLibrary) return;
+            // An imported legacy instance may only contain the Forge launcher
+            // arguments but not the Forge/FML library. Fall back to vanilla
+            // instead of failing with ClassNotFoundException: FMLTweaker.
+            version["mainClass"] = "net.minecraft.client.Minecraft";
+            version["minecraftArguments"] = args
+                .Replace("--tweakClass cpw.mods.fml.common.launcher.FMLTweaker", "", StringComparison.OrdinalIgnoreCase)
+                .Trim();
         }
 
         private static void RepairLegacyForgeArguments(JsonObject version)
@@ -855,18 +1041,77 @@ namespace AuroraLauncher
             version["minecraftArguments"] = args + " --tweakClass cpw.mods.fml.common.launcher.FMLTweaker";
         }
 
-        internal static JsonObject LoadVersionChain(string versionId)
+        private static void RepairLegacyForgeMainClass(JsonObject version)
         {
-            var file = Path.Combine(AppPaths.RootDir, "versions", versionId, versionId + ".json");
+            if (!string.Equals(version["mainClass"]?.GetValue<string>(), "net.minecraft.client.Minecraft", StringComparison.Ordinal)) return;
+            var args = version["minecraftArguments"]?.GetValue<string>() ?? "";
+            if (!args.Contains("--tweakClass", StringComparison.OrdinalIgnoreCase)) return;
+            if (version["libraries"] is not JsonArray libraries) return;
+            bool Exists(string name)
+            {
+                var rel = MavenPath(name);
+                return !string.IsNullOrEmpty(rel)
+                    && File.Exists(Path.Combine(AppPaths.RootDir, "libraries", rel.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            var hasLaunchwrapper = false;
+            var hasForge = false;
+            foreach (var item in libraries.OfType<JsonObject>())
+            {
+                var name = item["name"]?.GetValue<string>() ?? "";
+                if (name.Contains("launchwrapper", StringComparison.OrdinalIgnoreCase) && Exists(name)) hasLaunchwrapper = true;
+                if (name.Contains("minecraftforge:forge", StringComparison.OrdinalIgnoreCase) && Exists(name)) hasForge = true;
+            }
+            if (hasLaunchwrapper && hasForge) version["mainClass"] = "net.minecraft.launchwrapper.Launch";
+        }
+
+        // PCL: when Forge/LiteLoader and OptiFine share a launchwrapper version,
+        // the OptiFine tweaker must be OptiFineForgeTweaker and must come last,
+        // otherwise FML crashes before OptiFine gets a chance to load.
+        private static void RepairOptiFineTweaker(JsonObject version)
+        {
+            if (version["minecraftArguments"] is not JsonValue launchArgs
+                || !launchArgs.TryGetValue<string>(out var args)
+                || !args.Contains("OptiFine", StringComparison.OrdinalIgnoreCase)) return;
+            var libraries = version["libraries"] as JsonArray;
+            var hasForge = libraries?.OfType<JsonObject>().Any(item =>
+            {
+                var name = item["name"]?.GetValue<string>() ?? "";
+                return name.Contains("minecraftforge:forge", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("net.neoforged", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("litemod", StringComparison.OrdinalIgnoreCase);
+            }) == true;
+            if (!hasForge) return;
+            if (args.Contains("optifine.OptiFineForgeTweaker", StringComparison.OrdinalIgnoreCase))
+            {
+                args = args.Replace(" --tweakClass optifine.OptiFineForgeTweaker", "", StringComparison.OrdinalIgnoreCase)
+                    .Replace("--tweakClass optifine.OptiFineForgeTweaker ", "", StringComparison.OrdinalIgnoreCase);
+                version["minecraftArguments"] = args.Trim() + " --tweakClass optifine.OptiFineForgeTweaker";
+                return;
+            }
+            if (!args.Contains("optifine.OptiFineTweaker", StringComparison.OrdinalIgnoreCase)) return;
+            args = args.Replace(" --tweakClass optifine.OptiFineTweaker", "", StringComparison.OrdinalIgnoreCase)
+                .Replace("--tweakClass optifine.OptiFineTweaker ", "", StringComparison.OrdinalIgnoreCase);
+            version["minecraftArguments"] = args.Trim() + " --tweakClass optifine.OptiFineForgeTweaker";
+        }
+
+        internal static JsonObject LoadVersionChain(string versionId)
+            => LoadVersionChainFrom(Path.Combine(AppPaths.RootDir, "versions"), versionId);
+
+        internal static JsonObject LoadVersionChainFrom(string versionsRoot, string versionId)
+        {
+            var file = Path.Combine(versionsRoot, versionId, versionId + ".json");
             if (!File.Exists(file)) throw new Exception("版本文件不存在：" + versionId);
             var child = JsonNode.Parse(File.ReadAllText(file)) as JsonObject ?? throw new Exception("版本 JSON 格式不正确");
             var parentId = child["inheritsFrom"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(parentId))
             {
                 RepairLegacyForgeArguments(child);
+                RepairBrokenLegacyForge(child);
+                RepairLegacyForgeMainClass(child);
+                RepairOptiFineTweaker(child);
                 return child;
             }
-            var parent = LoadVersionChain(parentId);
+            var parent = LoadVersionChainFrom(versionsRoot, parentId);
             var merged = (JsonObject)JsonNode.Parse(parent.ToJsonString())!;
             merged["id"] = versionId;
             if (child["mainClass"] != null) merged["mainClass"] = child["mainClass"]!.DeepCloneCompat();
@@ -875,6 +1120,9 @@ namespace AuroraLauncher
             if (child["minecraftArguments"] != null)
                 merged["minecraftArguments"] = child["minecraftArguments"]!.DeepCloneCompat();
             RepairLegacyForgeArguments(merged);
+            RepairBrokenLegacyForge(merged);
+            RepairLegacyForgeMainClass(merged);
+            RepairOptiFineTweaker(merged);
             if (child["libraries"] is JsonArray childLibs)
             {
                 var libs = new JsonArray();

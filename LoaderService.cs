@@ -11,7 +11,7 @@ namespace AuroraLauncher
 {
     internal static class LoaderService
     {
-        private static string VersionsDir => Path.Combine(AppPaths.RootDir, "versions");
+        private static string VersionsDir => Path.Combine(AppPaths.InstallRoot, "versions");
         private static string LibrariesDir => Path.Combine(AppPaths.RootDir, "libraries");
 
         private static int Concurrency()
@@ -53,8 +53,10 @@ namespace AuroraLauncher
         {
             ProgressService.Begin($"安装 {kind} {loaderVersion ?? ""} ({mcVersion})");
             var cleanupBefore = VersionCleanup.Snapshot();
-            // The loader profile inherits from a vanilla version, so make sure it exists first.
-            await MinecraftInstallService.InstallVanilla(mcVersion, false, null, token, true, false);
+            string? installRoot = null;
+            string? installFolder = null;
+            try
+            {
             ProgressService.Step($"获取 {(kind == "fabric" ? "Fabric" : "Quilt")} 版本列表", 1, mcVersion);
             var list = await List(kind, mcVersion, token);
             ProgressService.Update(1, list.Count + " 个版本");
@@ -65,6 +67,16 @@ namespace AuroraLauncher
                 : versions.FirstOrDefault(item => item["stable"]?.GetValue<bool>() == true) ?? versions[0])
                 ?? versions[0];
             var version = picked["version"]!.GetValue<string>();
+            if (createInstance)
+            {
+                var installName = string.IsNullOrWhiteSpace(instanceName) ? $"{mcVersion}-{kind}-{version}" : instanceName!;
+                installFolder = MinecraftInstallService.ReserveFolder(installName);
+                installRoot = Path.Combine(AppPaths.RootDir, "versions", installFolder);
+                AppPaths.InstallRootOverride = installRoot;
+                Directory.CreateDirectory(Path.Combine(installRoot, "versions"));
+            }
+            // The loader profile inherits from a vanilla version, so make sure it exists first.
+            await MinecraftInstallService.InstallVanilla(mcVersion, false, null, token, true, false);
             ProgressService.Step("获取加载器配置", 1, version);
             ProgressService.Detail("正在获取 " + version + " 配置");
 
@@ -152,14 +164,40 @@ namespace AuroraLauncher
             }
 
             string? instanceId = null;
-            if (createInstance)
-                instanceId = MinecraftInstallService.CreateInstance(profileId, instanceName ?? profileId, kind, version, mcVersion, cleanupBefore);
-            if (kind == "fabric" && createInstance && !string.IsNullOrWhiteSpace(fabricApiVersion) && !string.IsNullOrWhiteSpace(instanceId))
+            try
             {
-                await FabricApiService.Install(mcVersion, fabricApiVersion, instanceId, token);
+                if (createInstance)
+                    instanceId = MinecraftInstallService.CreateInstance(profileId,
+                        string.IsNullOrWhiteSpace(instanceName) ? $"{mcVersion}-{kind}-{version}" : instanceName,
+                        kind, version, mcVersion, cleanupBefore, installFolder,
+                    Path.Combine(installRoot!, "versions"));
+                if (kind == "fabric" && createInstance && !string.IsNullOrWhiteSpace(fabricApiVersion) && !string.IsNullOrWhiteSpace(instanceId))
+                {
+                    await FabricApiService.Install(mcVersion, fabricApiVersion, instanceId, token);
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(instanceId)) InstallCleanup.Remove(instanceId!);
+                    VersionCleanup.Cleanup(cleanupBefore, "");
+                }
+                catch { }
+                ProgressService.Fail(ex.Message);
+                throw;
             }
             ProgressService.Complete();
             return new JsonObject { ["instanceId"] = instanceId, ["versionId"] = profileId };
+            }
+            finally
+            {
+                AppPaths.InstallRootOverride = null;
+                if (installRoot != null)
+                {
+                    try { Directory.Delete(Path.Combine(installRoot, "versions"), true); } catch { }
+                }
+            }
         }
 
         private static string? MavenPath(string name)

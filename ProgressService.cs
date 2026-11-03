@@ -9,6 +9,7 @@ namespace AuroraLauncher
     internal static class ProgressService
     {
         private static readonly object Gate = new();
+        private static long _lastEmit;
         private static readonly List<JsonObject> Groups = new();
         private static readonly AsyncLocal<string?> CurrentGroup = new();
         private static readonly AsyncLocal<string?> CurrentStep = new();
@@ -93,7 +94,15 @@ namespace AuroraLauncher
         }
 
         public static void UpdateAt(string stepId, double current, string detail = "")
-            => MutateAt(stepId, step => { step["current"] = current; step["detail"] = detail; step["status"] = "done"; });
+            => MutateAt(stepId, step =>
+            {
+                // 完成时若 total 已被下载进度设成字节数，直接写 1 会显示成 0%。
+                // 标记完成统一把 current 抬到 total。
+                var total = step["total"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<double>(out var t) ? t : 0;
+                step["current"] = Math.Max(current, total);
+                step["detail"] = detail;
+                step["status"] = "done";
+            });
 
         public static void ProgressAt(string stepId, double current, string detail = "")
             => MutateAt(stepId, step => { step["current"] = current; step["detail"] = detail; });
@@ -187,18 +196,27 @@ namespace AuroraLauncher
 
         private static void MutateAt(string stepId, Action<JsonObject> action)
         {
+            if (string.IsNullOrEmpty(stepId)) return;
+            var updated = false;
             lock (Gate)
             {
-                var group = ActiveGroup();
-                if (group?["steps"] is not JsonArray steps) return;
-                for (var i = 0; i < steps.Count; i++)
+                // Callbacks may run after another step/group became active (or on a
+                // context that lost the AsyncLocal group), so resolve the step by id
+                // across all groups instead of only the active one.
+                foreach (var group in Groups)
                 {
-                    if (steps[i] is not JsonObject step || step["id"]?.GetValue<string>() != stepId) continue;
-                    action(step);
-                    break;
+                    if (group["steps"] is not JsonArray steps) continue;
+                    for (var i = 0; i < steps.Count; i++)
+                    {
+                        if (steps[i] is not JsonObject step || step["id"]?.GetValue<string>() != stepId) continue;
+                        action(step);
+                        updated = true;
+                        break;
+                    }
+                    if (updated) break;
                 }
             }
-            Emit();
+            if (updated) EmitThrottled();
         }
 
         private static void MutateCurrent(Action<JsonObject> action)
@@ -215,6 +233,14 @@ namespace AuroraLauncher
                     break;
                 }
             }
+            EmitThrottled();
+        }
+
+        private static void EmitThrottled()
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (now - _lastEmit < 80) return;
+            _lastEmit = now;
             Emit();
         }
 

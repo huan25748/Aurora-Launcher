@@ -24,7 +24,7 @@ namespace AuroraLauncher
         {
             var settings = BridgeService.GetSettings();
             var id = settings["msClientId"]?.GetValue<string>()?.Trim();
-            return string.IsNullOrEmpty(id) ? "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" : id!;
+            return string.IsNullOrEmpty(id) ? "ff7e81d4-c1ab-4520-a957-9bccc7a2c704" : id!;
         }
 
         public static async Task<JsonObject> Start()

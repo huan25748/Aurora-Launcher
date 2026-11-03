@@ -26,40 +26,18 @@ namespace AuroraLauncher
 
                 var gameDir = instance["gameDir"]?.GetValue<string>()
                     ?? Path.Combine(AppPaths.RootDir, "versions", versionId);
-                var mods = Path.Combine(gameDir, "mods");
-                Directory.CreateDirectory(mods);
-                var existing = Directory.GetFiles(mods, "*.jar")
-                    .Select(Path.GetFileName)
-                    .Where(name => name != null)
-                    .Select(name => name!.ToLowerInvariant())
-                    .ToList();
-                // TransparentCapesPatch and CustomSkinLoader cannot coexist.
-                if (existing.Any(name => name.Contains("transparentcapes"))) return;
-
-                var hasCsl = existing.Any(name => name.Contains("customskinloader"));
-                if (!hasCsl)
+                // CustomSkinLoader 15.x universal crashes Forge 1.18.x with a
+                // module ResolutionException (exports net.minecraft.client.renderer).
+                if (loader == "forge" && mcVersion.StartsWith("1.18", StringComparison.Ordinal))
                 {
-                    var url = $"https://api.modrinth.com/v2/project/{Project}/version"
-                        + $"?loaders=%5B%22{loader}%22%5D&game_versions=%5B%22{Uri.EscapeDataString(mcVersion)}%22%5D";
-                    var text = await DownloadService.GetText(url);
-                    if (JsonNode.Parse(text) is not JsonArray versions) return;
-                    foreach (var item in versions.OfType<JsonObject>())
+                    try
                     {
-                        var files = item["files"] as JsonArray;
-                        var file = files?.OfType<JsonObject>().FirstOrDefault(entry => entry["primary"]?.GetValue<bool>() == true)
-                            ?? files?.OfType<JsonObject>().FirstOrDefault();
-                        if (file == null) continue;
-                        var fileUrl = file["url"]?.GetValue<string>();
-                        var fileName = file["filename"]?.GetValue<string>();
-                        if (string.IsNullOrWhiteSpace(fileUrl) || string.IsNullOrWhiteSpace(fileName)) continue;
-                        var target = Path.Combine(mods, fileName);
-                        if (!File.Exists(target))
-                            await DownloadService.Download(fileUrl!, target, file["hashes"]?["sha1"]?.GetValue<string>(),
-                                file["size"]?.GetValue<long>() ?? 0, token);
-                        break;
+                        foreach (var old in Directory.GetFiles(Path.Combine(gameDir, "mods"), "CustomSkinLoader_Universal*.jar"))
+                            File.Delete(old);
                     }
+                    catch { }
+                    return;
                 }
-
                 PrepareLocalFiles(gameDir, account);
                 WriteConfig(gameDir, account);
             }

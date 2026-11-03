@@ -50,10 +50,12 @@ namespace AuroraLauncher
             return node;
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, string Json)> SearchCache = new();
+
         public static async Task<JsonObject> Search(JsonElement input)
         {
             var projectType = GetString(input, "projectType") ?? "mod";
-            var classId = projectType switch { "modpack" => 4471, "resourcepack" => 12, "shader" => 6552, _ => 6 };
+            var classId = projectType switch { "modpack" => 4471, "resourcepack" => 12, "shader" => 6552, "datapack" => 6945, _ => 6 };
             var offset = GetInt(input, "offset", 0);
             var limit = Math.Clamp(GetInt(input, "limit", 20), 1, 50);
             var sort = GetString(input, "sort") ?? "downloads";
@@ -63,9 +65,14 @@ namespace AuroraLauncher
             if (!string.IsNullOrWhiteSpace(search)) query.Add("searchFilter=" + Uri.EscapeDataString(search!));
             var mcVersion = GetString(input, "mcVersion");
             if (!string.IsNullOrWhiteSpace(mcVersion)) query.Add("gameVersion=" + Uri.EscapeDataString(mcVersion!));
+            var categoryId = GetInt(input, "categoryId", 0);
+            if (categoryId > 0) query.Add("categoryId=" + categoryId);
             var loader = GetString(input, "loader");
             var loaderId = loader switch { "forge" => 1, "fabric" => 4, "quilt" => 5, "neoforge" => 6, _ => 0 };
             if (loaderId > 0) query.Add("modLoaderType=" + loaderId);
+            var cacheKey = string.Join("&", query);
+            if (SearchCache.TryGetValue(cacheKey, out var cached) && cached.At > DateTime.UtcNow.AddMinutes(-2))
+                return JsonNode.Parse(cached.Json) as JsonObject ?? new JsonObject();
             var raw = await Get("/mods/search?" + string.Join("&", query)) as JsonObject ?? new JsonObject();
             var hits = new JsonArray();
             if (raw["data"] is JsonArray data)
@@ -75,24 +82,37 @@ namespace AuroraLauncher
                     if (entry is JsonObject mod) { var hit = MapHit(mod); hit["nameTranslation"] = ModNamesService.Chinese("curseforge", hit["slug"]?.GetValue<string>()); hits.Add(hit); }
                 }
             }
-            return new JsonObject
+            var result = new JsonObject
             {
                 ["hits"] = hits,
                 ["total"] = raw["pagination"]?["totalCount"]?.GetValue<int>() ?? 0,
                 ["offset"] = offset,
                 ["limit"] = limit
             };
+            try { SearchCache[cacheKey] = (DateTime.UtcNow, result.ToJsonString()); } catch { }
+            return result;
         }
 
         public static async Task<JsonArray> Categories(string type)
         {
-            var classId = type switch { "modpack" => 4471, "resourcepack" => 12, "shader" => 6552, _ => 6 };
+            var classId = type switch { "modpack" => 4471, "resourcepack" => 12, "shader" => 6552, "datapack" => 6945, _ => 6 };
             var raw = await Get($"/categories?gameId=432&classId={classId}") as JsonObject;
-            var result = new JsonArray();
+            var items = new List<(int Id, string Name)>();
             if (raw?["data"] is JsonArray data)
                 foreach (var entry in data)
                     if (entry is JsonObject item)
-                        result.Add(new JsonObject { ["id"] = item["id"]?.GetValue<int>() ?? 0, ["name"] = item["name"]?.GetValue<string>() ?? "" });
+                        items.Add((item["id"]?.GetValue<int>() ?? 0, item["name"]?.GetValue<string>() ?? ""));
+            static int Resolution(string name)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(name.Trim(), "^(\\d{1,4})x$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                return match.Success && int.TryParse(match.Groups[1].Value, out var value) ? value : -1;
+            }
+            var result = new JsonArray();
+            foreach (var item in items
+                .OrderBy(x => Resolution(x.Name) >= 0 ? 0 : 1)
+                .ThenBy(x => Resolution(x.Name) >= 0 ? Resolution(x.Name) : int.MaxValue)
+                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+                result.Add(new JsonObject { ["id"] = item.Id, ["name"] = item.Name });
             return result;
         }
 
@@ -103,6 +123,17 @@ namespace AuroraLauncher
             var hit = MapHit(data);
             hit["nameTranslation"] = ModNamesService.Chinese("curseforge", hit["slug"]?.GetValue<string>());
             hit["description"] = data["description"]?.GetValue<string>() ?? data["summary"]?.GetValue<string>() ?? "";
+            try
+            {
+                var slug = data["slug"]?.GetValue<string>() ?? "";
+                if (!string.IsNullOrWhiteSpace(slug))
+                {
+                    var mirror = await ModrinthService.Project(slug);
+                    var body = mirror["body"]?.GetValue<string>() ?? "";
+                    if (body.Length > (hit["description"]?.GetValue<string>()?.Length ?? 0)) hit["description"] = body;
+                }
+            }
+            catch { }
             hit["descriptionTranslation"] = await TranslationService.Translate(data["summary"]?.GetValue<string>() ?? data["description"]?.GetValue<string>());
             hit["screenshots"] = data["screenshots"] is JsonArray screenshots
                 ? new JsonArray(screenshots.OfType<JsonObject>().Select(item => (JsonNode)(item["thumbnailUrl"]?.GetValue<string>() ?? item["url"]?.GetValue<string>() ?? "")).ToArray())
@@ -113,24 +144,63 @@ namespace AuroraLauncher
             return hit;
         }
 
+        private static readonly ConcurrentDictionary<int, (DateTime At, JsonArray Data)> FileCache = new();
+
         public static async Task<JsonArray> Files(int id, string? mcVersion, string? loader)
         {
+            var filtered = !string.IsNullOrWhiteSpace(mcVersion);
+            if (!filtered && FileCache.TryGetValue(id, out var cached) && DateTime.UtcNow - cached.At < TimeSpan.FromMinutes(30))
+                return (JsonArray)JsonNode.Parse(cached.Data.ToJsonString())!;
+
             var query = new List<string>();
-            if (!string.IsNullOrWhiteSpace(mcVersion)) query.Add("gameVersion=" + Uri.EscapeDataString(mcVersion!));
+            if (filtered) query.Add("gameVersion=" + Uri.EscapeDataString(mcVersion!));
             var loaderId = loader switch { "forge" => 1, "fabric" => 4, "quilt" => 5, "neoforge" => 6, _ => 0 };
-            if (loaderId > 0) query.Add("modLoaderType=" + loaderId);
-            var path = $"/mods/{id}/files" + (query.Count > 0 ? "?" + string.Join("&", query) : "");
-            var raw = await Get(path) as JsonObject;
+            if (filtered && loaderId > 0) query.Add("modLoaderType=" + loaderId);
+            query.Add("pageSize=" + (filtered ? "1000" : "10000"));
+
             var result = new JsonArray();
+            var raw = await Get($"/mods/{id}/files?" + string.Join("&", query)) as JsonObject;
             if (raw?["data"] is JsonArray data)
                 foreach (var entry in data)
                     if (entry is JsonObject file) result.Add(MapFile(file));
+
+            if (filtered && result.Count == 0)
+            {
+                // Nothing matched server-side: fall back to the full list.
+                return await Files(id, null, null);
+            }
+            if (!filtered)
+                FileCache[id] = (DateTime.UtcNow, (JsonArray)JsonNode.Parse(result.ToJsonString())!);
+            return result;
+        }
+
+        public static async Task<int> FileCount(int id)
+        {
+            try
+            {
+                var raw = await Get($"/mods/{id}/files?pageSize=1") as JsonObject;
+                return raw?["pagination"]?["totalCount"]?.GetValue<int>() ?? 0;
+            }
+            catch { return 0; }
+        }
+
+        public static async Task<JsonArray> FilesPage(int id, int index, int pageSize)
+        {
+            var result = new JsonArray();
+            try
+            {
+                var raw = await Get($"/mods/{id}/files?index={index}&pageSize={pageSize}") as JsonObject;
+                if (raw?["data"] is JsonArray data)
+                    foreach (var entry in data)
+                        if (entry is JsonObject file) result.Add(MapFile(file));
+            }
+            catch { }
             return result;
         }
 
         public static async Task<JsonObject> Install(JsonElement input)
         {
-            ProgressService.Begin("安装 CurseForge 内容");
+            var ownsCard = ProgressService.Begin("安装 CurseForge 内容");
             var instanceId = GetString(input, "instanceId") ?? "";
             ProgressService.Step("获取文件信息", 1, "" + GetInt(input, "modId", 0));
             var file = await ResolveFile(GetInt(input, "modId", 0), GetInt(input, "fileId", 0));
@@ -162,7 +232,7 @@ namespace AuroraLauncher
             });
             ProgressService.TotalAt(downloadStep, 1);
             ProgressService.UpdateAt(downloadStep, 1, "下载完成");
-            ProgressService.Complete();
+            if (ownsCard) ProgressService.Complete();
             return new JsonObject
             {
                 ["path"] = target,
@@ -201,9 +271,10 @@ namespace AuroraLauncher
             var instanceName = GetString(input, "instanceName");
             var packName = "";
             var packTitle = "安装整合包";
+            JsonObject? projectInfo = null;
             try
             {
-                var project = await Project(modId);
+                var project = projectInfo = await Project(modId);
                 if (project["name"]?.GetValue<string>() is string projectName && projectName.Length > 0)
                 {
                     packName = projectName;
@@ -214,6 +285,9 @@ namespace AuroraLauncher
             if (string.IsNullOrWhiteSpace(instanceName))
                 instanceName = string.IsNullOrWhiteSpace(packName) ? "CurseForge 整合包" : packName;
             ProgressService.BeginPack(packTitle);
+            string? createdInstanceId = null;
+            try
+            {
             var infoStep = ProgressService.Step("获取整合包文件", 1, "正在获取");
             var file = await ResolveFile(modId, fileId);
             ProgressService.UpdateAt(infoStep, 1, "已获取");
@@ -231,10 +305,55 @@ namespace AuroraLauncher
             ProgressService.UpdateAt(packStep, 1, "整合包已下载");
             var temp = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "extract-" + Guid.NewGuid().ToString("N")[..8]);
             Directory.CreateDirectory(temp);
-            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, temp, true);
+            var extractStep = ProgressService.Step("解压整合包", 1, "准备解压");
+            var extractTotal = 0;
+            ArchiveService.ExtractWithProgress(zipPath, temp, (done, total) =>
+            {
+                extractTotal = total;
+                if (total > 0) ProgressService.TotalAt(extractStep, total);
+                ProgressService.ProgressAt(extractStep, done, done + "/" + total);
+            });
+            ProgressService.UpdateAt(extractStep, extractTotal > 0 ? extractTotal : 1, "解压完成");
             var manifestPath = Path.Combine(temp, "manifest.json");
-            if (!File.Exists(manifestPath)) throw new Exception("整合包缺少 manifest.json");
-            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject ?? throw new Exception("整合包 manifest 格式错误");
+            JsonObject manifest;
+            if (File.Exists(manifestPath))
+            {
+                manifest = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject ?? throw new Exception("整合包 manifest 格式错误");
+            }
+            else
+            {
+                var altPath = Path.Combine(temp, "minecraftinstance.json");
+                if (File.Exists(altPath))
+                {
+                    var alt = JsonNode.Parse(File.ReadAllText(altPath)) as JsonObject ?? throw new Exception("整合包 minecraftinstance.json 格式错误");
+                    var loaderInfo = alt["baseModLoader"] as JsonObject;
+                    var loaderId = loaderInfo?["name"]?.GetValue<string>() ?? "";
+                    var gameVersion = alt["gameVersion"]?.GetValue<string>() ?? loaderInfo?["minecraftVersion"]?.GetValue<string>() ?? "";
+                    manifest = new JsonObject
+                    {
+                        ["minecraft"] = new JsonObject
+                        {
+                            ["version"] = gameVersion,
+                            ["modLoaders"] = new JsonArray(new JsonObject { ["id"] = loaderId })
+                        },
+                        ["files"] = new JsonArray()
+                    };
+                }
+                else
+                {
+                    var detected = DetectMinecraftArchive(temp)
+                        ?? throw new Exception("该整合包不是标准 CurseForge 格式：缺少 manifest.json，且压缩包内没有 versions 目录，无法识别游戏版本与加载器");
+                    manifest = new JsonObject
+                    {
+                        ["minecraft"] = new JsonObject
+                        {
+                            ["version"] = detected.Mc,
+                            ["modLoaders"] = new JsonArray(new JsonObject { ["id"] = detected.Loader + "-" + detected.LoaderVersion })
+                        },
+                        ["files"] = new JsonArray()
+                    };
+                }
+            }
             var mcVersion = manifest["minecraft"]?["version"]?.GetValue<string>() ?? "";
             var loaderText = (manifest["minecraft"]?["modLoaders"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault()?["id"]?.GetValue<string>() ?? "";
             var loader = loaderText.StartsWith("fabric-") ? "fabric" : loaderText.StartsWith("quilt-") ? "quilt" : loaderText.StartsWith("neoforge-") ? "neoforge" : loaderText.StartsWith("forge-") ? "forge" : "vanilla";
@@ -258,7 +377,9 @@ namespace AuroraLauncher
                 var result = await MinecraftInstallService.InstallVanilla(mcVersion, true, instanceName);
                 instanceId = result["instanceId"]?.GetValue<string>() ?? throw new Exception("创建整合包实例失败");
             }
+            createdInstanceId = instanceId;
             var instance = BridgeService.GetInstance(instanceId) as JsonObject ?? throw new Exception("实例不存在");
+            await InstanceIconService.EnsureRemote(instanceId, instance["gameDir"]?.GetValue<string>() ?? "", projectInfo);
             ProgressService.UpdateAt(baseStep, 1, "安装完成");
             ProgressService.Begin("安装 CurseForge 整合包资源");
             var downloadStep = ProgressService.Step("下载模组文件", (manifest["files"] as JsonArray)?.Count ?? 0, "");
@@ -278,8 +399,28 @@ namespace AuroraLauncher
                 var required = files.OfType<JsonObject>()
                     .Where(entry => entry["required"]?.GetValue<bool>() != false)
                     .ToList();
+                var resolved = new System.Collections.Concurrent.ConcurrentDictionary<(int, int), JsonObject>();
+                long packTotal = 0;
+                using (var resolveGate = new System.Threading.SemaphoreSlim(16))
+                {
+                    await Task.WhenAll(required.Select(async entry =>
+                    {
+                        var projectId = entry["projectID"]?.GetValue<int>() ?? 0;
+                        var modFileId = entry["fileID"]?.GetValue<int>() ?? 0;
+                        try
+                        {
+                            await resolveGate.WaitAsync();
+                            var info = await ResolveFile(projectId, modFileId);
+                            resolved[(projectId, modFileId)] = info;
+                            System.Threading.Interlocked.Add(ref packTotal, info["fileLength"]?.GetValue<long>() ?? 0);
+                        }
+                        catch { }
+                        finally { resolveGate.Release(); }
+                    }));
+                }
                 var doneCount = 0;
-                ProgressService.TotalAt(downloadStep, required.Count);
+                long packDone = 0;
+                ProgressService.TotalAt(downloadStep, packTotal > 0 ? packTotal : required.Count);
                 using var gate = new System.Threading.SemaphoreSlim(8);
                 await Task.WhenAll(required.Select(async entry =>
                 {
@@ -288,11 +429,8 @@ namespace AuroraLauncher
                     try
                     {
                         await gate.WaitAsync();
-                        // The mirror's /download endpoint returns 404 for many
-                        // pack files. Resolve the file metadata (filename and
-                        // download URL) and use the same CDN fallback as single
-                        // mod installation.
-                        var info = await ResolveFile(projectId, modFileId);
+                        resolved.TryGetValue((projectId, modFileId), out var info);
+                        info ??= await ResolveFile(projectId, modFileId);
                         var fileName = info["fileName"]?.GetValue<string>() ?? $"{projectId}-{modFileId}.jar";
                         var destDir = modsDir;
                         if (!fileName.EndsWith(".jar", StringComparison.OrdinalIgnoreCase))
@@ -305,7 +443,18 @@ namespace AuroraLauncher
                                 : Path.Combine(gameDir, "resourcepacks");
                         }
                         Directory.CreateDirectory(destDir);
-                        await DownloadFile(info, Path.Combine(destDir, Path.GetFileName(fileName)));
+                        ProgressService.Detail(Path.GetFileName(fileName));
+                        long lastReceived = 0;
+                        await DownloadFile(info, Path.Combine(destDir, Path.GetFileName(fileName)), (received, totalBytes) =>
+                        {
+                            var delta = Math.Max(0, received - lastReceived);
+                            lastReceived = received;
+                            var aggregate = System.Threading.Interlocked.Add(ref packDone, delta);
+                            var text = Path.GetFileName(fileName);
+                            if (packTotal > 0)
+                                text += " · " + MinecraftInstallService.FormatBytes(aggregate) + " / " + MinecraftInstallService.FormatBytes(packTotal);
+                            ProgressService.ProgressAt(downloadStep, packTotal > 0 ? aggregate : doneCount, text);
+                        });
                         downloaded++;
                     }
                     catch (Exception ex)
@@ -316,10 +465,10 @@ namespace AuroraLauncher
                     {
                         gate.Release();
                         var done = System.Threading.Interlocked.Increment(ref doneCount);
-                        ProgressService.ProgressAt(downloadStep, done, $"{done}/{required.Count}");
+                        if (packTotal <= 0) ProgressService.ProgressAt(downloadStep, done, $"{done}/{required.Count}");
                     }
                 }));
-                ProgressService.UpdateAt(downloadStep, required.Count, "下载完成");
+                ProgressService.UpdateAt(downloadStep, packTotal > 0 ? packTotal : required.Count, "下载完成");
             }
             foreach (var folder in new[] { manifest["overrides"]?.GetValue<string>() ?? "overrides", "client-overrides" })
             {
@@ -333,12 +482,82 @@ namespace AuroraLauncher
                     File.Copy(source, target, true);
                 }
             }
+            var hasOverrides = Directory.Exists(Path.Combine(temp, "overrides")) || Directory.Exists(Path.Combine(temp, "client-overrides"));
+            var hasFiles = (manifest["files"] as JsonArray)?.Count > 0;
+            if (!hasOverrides && !hasFiles)
+            {
+                foreach (var source in Directory.EnumerateFiles(temp, "*", SearchOption.AllDirectories))
+                {
+                    var relative = Path.GetRelativePath(temp, source);
+                    var top = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+                    if (relative.Equals("manifest.json", StringComparison.OrdinalIgnoreCase)
+                        || relative.Equals("minecraftinstance.json", StringComparison.OrdinalIgnoreCase)
+                        || relative.Equals("modrinth.index.json", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (top.Equals("versions", StringComparison.OrdinalIgnoreCase)
+                        || top.Equals("libraries", StringComparison.OrdinalIgnoreCase)
+                        || top.Equals("assets", StringComparison.OrdinalIgnoreCase)
+                        || top.Equals("logs", StringComparison.OrdinalIgnoreCase)
+                        || top.Equals("crash-reports", StringComparison.OrdinalIgnoreCase)) continue;
+                    var target = Path.Combine(gameDir, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    File.Copy(source, target, true);
+                }
+            }
             try { Directory.Delete(temp, true); } catch { }
             try { File.Delete(zipPath); } catch { }
-            ProgressService.Update(downloaded, "整合包文件已下载");
             ProgressService.CompletePack();
             return new JsonObject { ["instanceId"] = instanceId, ["missing"] = missing, ["files"] = downloaded };
+            }
+            catch
+            {
+                InstallCleanup.Remove(createdInstanceId);
+                throw;
+            }
         }
+
+        private static (string Mc, string Loader, string LoaderVersion)? DetectMinecraftArchive(string root)
+        {
+            try
+            {
+                var versions = Path.Combine(root, "versions");
+                if (!Directory.Exists(versions)) return null;
+                foreach (var jsonPath in Directory.GetFiles(versions, "*.json", SearchOption.AllDirectories))
+                {
+                    if (JsonNode.Parse(File.ReadAllText(jsonPath)) is not JsonObject version) continue;
+                    var id = version["id"]?.GetValue<string>() ?? "";
+                    var mc = version["clientVersion"]?.GetValue<string>()
+                        ?? version["inheritsFrom"]?.GetValue<string>()
+                        ?? (System.Text.RegularExpressions.Regex.Match(id, "\\d+\\.\\d+(?:\\.\\d+)?").Success ? id : "");
+                    var mcMatch = System.Text.RegularExpressions.Regex.Match(mc, "\\d+\\.\\d+(?:\\.\\d+)?");
+                    if (!mcMatch.Success) continue;
+                    var loader = "vanilla";
+                    var loaderVersion = "";
+                    var args = (version["arguments"]?["game"] as JsonArray)?.OfType<JsonValue>().Select(v => v.GetValue<string>()).ToList() ?? new List<string>();
+                    string? Next(string key)
+                    {
+                        var index = args.IndexOf(key);
+                        return index >= 0 && index + 1 < args.Count ? args[index + 1] : null;
+                    }
+                    var neo = Next("--fml.neoForgeVersion");
+                    var forge = Next("--fml.forgeVersion");
+                    if (!string.IsNullOrWhiteSpace(neo)) { loader = "neoforge"; loaderVersion = neo!; }
+                    else if (!string.IsNullOrWhiteSpace(forge)) { loader = "forge"; loaderVersion = forge!; }
+                    else
+                    {
+                        var text = version.ToJsonString();
+                        var fabric = System.Text.RegularExpressions.Regex.Match(text, "net\\.fabricmc:fabric-loader:([^:]+)");
+                        var quilt = System.Text.RegularExpressions.Regex.Match(text, "org\\.quiltmc:quilt-loader:([^:]+)");
+                        if (fabric.Success) { loader = "fabric"; loaderVersion = fabric.Groups[1].Value; }
+                        else if (quilt.Success) { loader = "quilt"; loaderVersion = quilt.Groups[1].Value; }
+                    }
+                    return (mcMatch.Value, loader, loaderVersion);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static Task<JsonObject> FileDetails(int modId, int fileId) => ResolveFile(modId, fileId);
 
         private static async Task<JsonObject> ResolveFile(int modId, int fileId)
         {
@@ -352,6 +571,11 @@ namespace AuroraLauncher
             return MapFile(data);
         }
 
+        private static string NormalizeVersion(string value)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(value, @"-(rc|pre|snapshot|beta|alpha)\d*$", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
         private static void ValidateFileForInstance(JsonObject file, JsonObject instance)
         {
             var versions = (file["gameVersions"] as JsonArray)?.OfType<JsonValue>()
@@ -359,8 +583,25 @@ namespace AuroraLauncher
                 .ToList() ?? new List<string>();
             if (versions.Count == 0) return;
             var mcVersion = instance["mcVersion"]?.GetValue<string>() ?? "";
-            if (mcVersion.Length > 0 && !versions.Contains(mcVersion))
-                throw new Exception($"文件不适用于当前实例：文件支持 {string.Join(", ", versions.Take(6))}，实例是 {mcVersion}");
+            if (mcVersion.Length > 0)
+            {
+                var matched = versions.Any(item =>
+                    string.Equals(item, mcVersion, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(NormalizeVersion(item), NormalizeVersion(mcVersion), StringComparison.OrdinalIgnoreCase));
+                if (!matched)
+                {
+                    var display = file["displayName"]?.GetValue<string>() ?? "";
+                    var prefix = System.Text.RegularExpressions.Regex.Match(display, @"^\[([^\]]+)\]");
+                    if (prefix.Success)
+                    {
+                        var value = prefix.Groups[1].Value;
+                        matched = string.Equals(value, mcVersion, StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(NormalizeVersion(value), NormalizeVersion(mcVersion), StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                if (!matched)
+                    throw new Exception($"文件不适用于当前实例：文件支持 {string.Join(", ", versions.Take(6))}，实例是 {mcVersion}");
+            }
             var loader = instance["loader"]?.GetValue<string>() ?? "";
             var loaderName = loader switch
             {
@@ -394,20 +635,29 @@ namespace AuroraLauncher
         private static JsonObject MapHit(JsonObject raw)
         {
             var classId = raw["classId"]?.GetValue<int>() ?? 6;
-            var projectType = classId == 4471 ? "modpack" : classId == 12 ? "resourcepack" : classId == 6552 ? "shader" : "mod";
+            var projectType = classId == 4471 ? "modpack" : classId == 12 ? "resourcepack" : classId == 6552 ? "shader" : classId == 6945 ? "datapack" : "mod";
+            var thumb = raw["logo"]?["thumbnailUrl"]?.GetValue<string>();
+            var fullLogo = raw["logo"]?["url"]?.GetValue<string>();
+            var logo = string.IsNullOrWhiteSpace(thumb) ? fullLogo : thumb;
             return new JsonObject
             {
                 ["id"] = raw["id"]?.GetValue<int>() ?? 0,
                 ["name"] = raw["name"]?.GetValue<string>() ?? "",
                 ["slug"] = raw["slug"]?.GetValue<string>() ?? "",
                 ["summary"] = raw["summary"]?.GetValue<string>() ?? "",
-                ["logo"] = raw["logo"]?["thumbnailUrl"]?.GetValue<string>() ?? raw["logo"]?["url"]?.GetValue<string>(),
+                ["logo"] = logo,
                 ["downloads"] = raw["downloadCount"]?.GetValue<long>() ?? 0,
                 ["categories"] = new JsonArray((raw["categories"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().Select(item => (JsonNode)(item["name"]?.GetValue<string>() ?? "")).ToArray()),
                 ["authors"] = new JsonArray((raw["authors"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().Select(item => (JsonNode)(item["name"]?.GetValue<string>() ?? "")).ToArray()),
                 ["classId"] = classId,
                 ["projectType"] = projectType,
-                ["dateModified"] = raw["dateModified"]?.GetValue<string>() ?? raw["dateCreated"]?.GetValue<string>() ?? ""
+                ["dateModified"] = raw["dateModified"]?.GetValue<string>() ?? raw["dateCreated"]?.GetValue<string>() ?? "",
+                ["title"] = raw["name"]?.GetValue<string>() ?? "",
+                ["icon_url"] = logo,
+                ["description"] = raw["summary"]?.GetValue<string>() ?? "",
+                ["project_id"] = raw["id"]?.GetValue<int>() ?? 0,
+                ["author"] = (raw["authors"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault()?["name"]?.GetValue<string>() ?? "",
+                ["project_type"] = projectType
             };
         }
 

@@ -34,6 +34,7 @@ namespace AuroraLauncher
             // Minecraft may still be saving the world. The game keeps running and
             // exits normally when the player quits it.
             try { ForgeService.StopInstaller(); } catch { }
+            try { Aria2Service.Stop(); } catch { }
             try { Browser.Dispose(); } catch { }
         }
 
@@ -54,7 +55,7 @@ namespace AuroraLauncher
                 }
                 catch { }
                 var assets = AssetBundle.Ensure();
-                var dataDir = Path.Combine(AppContext.BaseDirectory, ".webview2", assets.VersionHash);
+                var dataDir = Path.Combine(AppContext.BaseDirectory, ".webview2");
                 Directory.CreateDirectory(dataDir);
                 var environment = await CoreWebView2Environment.CreateAsync(null, dataDir);
                 await Browser.EnsureCoreWebView2Async(environment);
@@ -66,10 +67,26 @@ namespace AuroraLauncher
                 var handle = new WindowInteropHelper(this).Handle;
                 var corner = 2;
                 try { DwmSetWindowAttribute(handle, 33, ref corner, sizeof(int)); } catch { }
+                try { Browser.DefaultBackgroundColor = System.Drawing.Color.Transparent; } catch { }
                 var core = Browser.CoreWebView2;
                 core.Settings.AreDevToolsEnabled = true;
                 core.Settings.AreDefaultContextMenusEnabled = false;
                 core.Settings.IsStatusBarEnabled = false;
+                core.NewWindowRequested += (_, e) =>
+                {
+                    if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var target)) return;
+                    if (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps) return;
+                    e.Handled = true;
+                    OpenExternal(target.AbsoluteUri);
+                };
+                core.NavigationStarting += (_, e) =>
+                {
+                    if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var target)) return;
+                    if (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps) return;
+                    if (target.Host.Contains("aurora", StringComparison.OrdinalIgnoreCase) || target.IsLoopback) return;
+                    e.Cancel = true;
+                    OpenExternal(target.AbsoluteUri);
+                };
 
                 var renderer = assets.RendererDir;
                 core.SetVirtualHostNameToFolderMapping("aurora.local", renderer, CoreWebView2HostResourceAccessKind.Allow);
@@ -100,6 +117,7 @@ namespace AuroraLauncher
                 if (File.Exists(shimFile))
                     await core.AddScriptToExecuteOnDocumentCreatedAsync(File.ReadAllText(shimFile));
 
+
                 core.WebMessageReceived += OnWebMessage;
                 GameEvents.Raised += (name, payload) =>
                 {
@@ -129,6 +147,11 @@ namespace AuroraLauncher
         private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+
+        private static void OpenExternal(string url)
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+        }
 
         private void ApplyRoundedRegion()
         {

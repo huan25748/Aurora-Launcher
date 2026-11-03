@@ -16,7 +16,7 @@ namespace AuroraLauncher
     {
         private static readonly object InstallerGate = new();
         private static Process? _installerProcess;
-        private static string VersionsDir => Path.Combine(AppPaths.RootDir, "versions");
+        private static string VersionsDir => Path.Combine(AppPaths.InstallRoot, "versions");
 
         private static int Concurrency()
         {
@@ -141,6 +141,9 @@ namespace AuroraLauncher
         {
             ProgressService.Begin($"安装 {kind} {loaderVersion ?? ""} ({mcVersion})");
             var cleanupBefore = VersionCleanup.Snapshot();
+            string? createdInstanceId = null;
+            string? installRoot = null;
+            string? installFolder = null;
             try
             {
             // Old launcher: if this exact loader version is already installed,
@@ -154,7 +157,33 @@ namespace AuroraLauncher
                     ProgressService.UpdateAt(reuseStep, 1, "已安装，跳过重复安装");
                     string? reuseInstance = null;
                     if (createInstance)
-                        reuseInstance = MinecraftInstallService.CreateInstance(reused, instanceName ?? reused, kind, loaderVersion!, mcVersion, cleanupBefore);
+                    {
+                        try
+                        {
+                            var reuseName = string.IsNullOrWhiteSpace(instanceName) ? DefaultInstanceName(mcVersion, kind, loaderVersion!, optifineVersion) : instanceName!;
+                            installFolder = MinecraftInstallService.ReserveFolder(reuseName);
+                            installRoot = Path.Combine(AppPaths.RootDir, "versions", installFolder);
+                            AppPaths.InstallRootOverride = installRoot;
+                            Directory.CreateDirectory(Path.Combine(installRoot, "versions"));
+                            Directory.CreateDirectory(Path.Combine(installRoot, "libraries"));
+                            var realDir = Path.Combine(AppPaths.RootDir, "versions", reused);
+                            var stagedDir = Path.Combine(AppPaths.InstallRoot, "versions", reused);
+                            Directory.CreateDirectory(stagedDir);
+                            foreach (var file in Directory.EnumerateFiles(realDir, "*", SearchOption.AllDirectories))
+                            {
+                                var relative = Path.GetRelativePath(realDir, file);
+                                var target = Path.Combine(stagedDir, relative);
+                                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                                File.Copy(file, target, true);
+                            }
+                        }
+                        catch { }
+                        reuseInstance = MinecraftInstallService.CreateInstance(reused,
+                            string.IsNullOrWhiteSpace(instanceName) ? DefaultInstanceName(mcVersion, kind, loaderVersion!, optifineVersion) : instanceName,
+                            kind, loaderVersion!, mcVersion, cleanupBefore, installFolder,
+                            Path.Combine(installRoot!, "versions"));
+                    }
+                    createdInstanceId = reuseInstance;
                     ProgressService.Complete();
                     return new JsonObject { ["instanceId"] = reuseInstance, ["versionId"] = reused, ["loaderVersion"] = loaderVersion };
                 }
@@ -166,6 +195,15 @@ namespace AuroraLauncher
             var chosen = (!string.IsNullOrWhiteSpace(loaderVersion) ? versions.FirstOrDefault(v => v == loaderVersion) : null) ?? versions[0];
             ProgressService.Update(1, "已选择 " + chosen);
 
+            if (createInstance && installRoot == null)
+            {
+                var installName = string.IsNullOrWhiteSpace(instanceName) ? DefaultInstanceName(mcVersion, kind, chosen, optifineVersion) : instanceName!;
+                installFolder = MinecraftInstallService.ReserveFolder(installName);
+                installRoot = Path.Combine(AppPaths.RootDir, "versions", installFolder);
+                AppPaths.InstallRootOverride = installRoot;
+                Directory.CreateDirectory(Path.Combine(installRoot, "versions"));
+                Directory.CreateDirectory(Path.Combine(installRoot, "libraries"));
+            }
             var baseTask = MinecraftInstallService.InstallVanilla(mcVersion, false, null, token, true, false);
 
             var installerPath = Path.Combine(AppPaths.SettingsDir, "cache", "installers", $"{kind}-{chosen}-installer.jar");
@@ -222,7 +260,31 @@ namespace AuroraLauncher
                 var legacyVersion = await InstallLegacyForge(installerPath, mcVersion, chosen, token);
                 string? legacyInstance = null;
                 if (createInstance)
-                    legacyInstance = MinecraftInstallService.CreateInstance(legacyVersion, instanceName ?? legacyVersion, kind, chosen, mcVersion, cleanupBefore);
+                    legacyInstance = MinecraftInstallService.CreateInstance(legacyVersion,
+                        string.IsNullOrWhiteSpace(instanceName) ? DefaultInstanceName(mcVersion, kind, chosen, optifineVersion) : instanceName,
+                        kind, chosen, mcVersion, cleanupBefore, installFolder,
+                        Path.Combine(installRoot!, "versions"));
+                createdInstanceId = legacyInstance;
+                if (kind == "forge" && !string.IsNullOrWhiteSpace(optifineVersion) && !string.IsNullOrWhiteSpace(legacyInstance))
+                {
+                    var legacyOptifineStep = ProgressService.Step("下载 OptiFine", 1, optifineVersion);
+                    var legacyOptifine = await OptiFineService.DownloadFile(mcVersion, optifineVersion, token, (received, total) =>
+                    {
+                        if (total > 0) ProgressService.TotalAt(legacyOptifineStep, total);
+                        ProgressService.ProgressAt(legacyOptifineStep, received,
+                            MinecraftInstallService.FormatBytes(received) + (total > 0 ? " / " + MinecraftInstallService.FormatBytes(total) : ""));
+                    });
+                    ProgressService.UpdateAt(legacyOptifineStep, 1, "OptiFine 已下载");
+                    var legacyRecord = BridgeService.GetInstance(legacyInstance) as JsonObject;
+                    var legacyGameDir = legacyRecord?["gameDir"]?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(legacyGameDir))
+                    {
+                        var legacyMods = Path.Combine(legacyGameDir!, "mods");
+                        Directory.CreateDirectory(legacyMods);
+                        File.Copy(legacyOptifine.File, Path.Combine(legacyMods, legacyOptifine.FileName), true);
+                        ProgressService.Detail("OptiFine 已放入实例 mods");
+                    }
+                }
                 ProgressService.Update(1, "旧版 Forge 已安装");
                 ProgressService.Complete();
                 return new JsonObject { ["instanceId"] = legacyInstance, ["versionId"] = legacyVersion, ["loaderVersion"] = chosen };
@@ -238,15 +300,24 @@ namespace AuroraLauncher
             (string File, string FileName)? optifine = null;
             if (kind == "forge" && !string.IsNullOrWhiteSpace(optifineVersion))
             {
-                ProgressService.Step("下载 OptiFine", 1, optifineVersion);
-                optifine = await OptiFineService.DownloadFile(mcVersion, optifineVersion, token);
-                ProgressService.Update(1, "OptiFine 已下载");
+                var optifineStep = ProgressService.Step("下载 OptiFine", 1, optifineVersion);
+                optifine = await OptiFineService.DownloadFile(mcVersion, optifineVersion, token, (received, total) =>
+                {
+                    if (total > 0) ProgressService.TotalAt(optifineStep, total);
+                    ProgressService.ProgressAt(optifineStep, received,
+                        MinecraftInstallService.FormatBytes(received) + (total > 0 ? " / " + MinecraftInstallService.FormatBytes(total) : ""));
+                });
+                ProgressService.UpdateAt(optifineStep, 1, "OptiFine 已下载");
             }
 
             string? instanceId = null;
             if (createInstance)
             {
-                instanceId = MinecraftInstallService.CreateInstance(installed, instanceName ?? installed, kind, chosen, mcVersion, cleanupBefore);
+                instanceId = MinecraftInstallService.CreateInstance(installed,
+                    string.IsNullOrWhiteSpace(instanceName) ? DefaultInstanceName(mcVersion, kind, chosen, optifineVersion) : instanceName,
+                    kind, chosen, mcVersion, cleanupBefore, installFolder,
+                    Path.Combine(installRoot!, "versions"));
+                createdInstanceId = instanceId;
                 if (optifine != null)
                 {
                     var instance = BridgeService.GetInstance(instanceId) as JsonObject;
@@ -265,9 +336,54 @@ namespace AuroraLauncher
             }
             catch (Exception ex)
             {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(createdInstanceId)) InstallCleanup.Remove(createdInstanceId!);
+                    VersionCleanup.Cleanup(cleanupBefore, "");
+                }
+                catch { }
                 ProgressService.Fail(ex.Message);
                 throw;
             }
+            finally
+            {
+                AppPaths.InstallRootOverride = null;
+                if (installRoot != null)
+                {
+                    try
+                    {
+                        var stagedLibraries = Path.Combine(installRoot, "libraries");
+                        var realLibraries = Path.Combine(AppPaths.RootDir, "libraries");
+                        if (Directory.Exists(stagedLibraries))
+                        {
+                            foreach (var file in Directory.EnumerateFiles(stagedLibraries, "*", SearchOption.AllDirectories))
+                            {
+                                var relative = Path.GetRelativePath(stagedLibraries, file);
+                                var target = Path.Combine(realLibraries, relative);
+                                if (File.Exists(target)) continue;
+                                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                                try { File.Copy(file, target, true); } catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                    try { Directory.Delete(Path.Combine(installRoot, "versions"), true); } catch { }
+                    try { Directory.Delete(Path.Combine(installRoot, "libraries"), true); } catch { }
+                    try { File.Delete(Path.Combine(installRoot, "launcher_profiles.json")); } catch { }
+                }
+            }
+        }
+
+        private static string DefaultInstanceName(string mcVersion, string kind, string loaderVersion, string? optifineVersion)
+        {
+            var name = $"{mcVersion}-{kind}-{loaderVersion}";
+            if (string.IsNullOrWhiteSpace(optifineVersion)) return name;
+            var patch = optifineVersion!;
+            var marker = "OptiFine_";
+            var index = patch.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index >= 0) patch = patch[(index + marker.Length)..];
+            else if (patch.StartsWith(mcVersion + "-", StringComparison.Ordinal)) patch = patch[(mcVersion.Length + 1)..];
+            return name + "-OptiFine_" + patch;
         }
 
         private static bool IsLegacyForgeInstaller(string installerPath)
@@ -332,7 +448,7 @@ namespace AuroraLauncher
 
         private static async Task PrefetchInstallerLibraries(string installerPath, string mcVersion, CancellationToken token)
         {
-            var librariesDir = Path.Combine(AppPaths.RootDir, "libraries");
+            var librariesDir = Path.Combine(AppPaths.InstallRoot, "libraries");
             var tasks = new List<(string Url, string Path, string? Sha1)>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             string? mappingsCoord = null;
@@ -350,6 +466,18 @@ namespace AuroraLauncher
                 if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(url)) return;
                 var full = Path.Combine(librariesDir, path!.Replace('/', Path.DirectorySeparatorChar));
                 if (!seen.Add(full)) return;
+                try
+                {
+                    if (File.Exists(full) && new FileInfo(full).Length > 0) return;
+                    var globalPath = Path.Combine(AppPaths.RootDir, "libraries", path.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(globalPath) && new FileInfo(globalPath).Length > 0)
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                        File.Copy(globalPath, full, true);
+                        return;
+                    }
+                }
+                catch { }
                 tasks.Add((url!, full, sha1));
             }
 
@@ -463,9 +591,10 @@ namespace AuroraLauncher
 
         private static string? FindInstalledLoader(string kind, string mcVersion, string loaderVersion)
         {
-            if (!Directory.Exists(VersionsDir)) return null;
+            var realVersions = Path.Combine(AppPaths.RootDir, "versions");
+            if (!Directory.Exists(realVersions)) return null;
             var needle = kind == "forge" ? "net.minecraftforge" : "net.neoforged";
-            foreach (var dir in Directory.GetDirectories(VersionsDir))
+            foreach (var dir in Directory.GetDirectories(realVersions))
             {
                 var id = Path.GetFileName(dir);
                 if (string.IsNullOrWhiteSpace(id) || !id.Contains(loaderVersion, StringComparison.OrdinalIgnoreCase)) continue;
@@ -527,7 +656,7 @@ namespace AuroraLauncher
                 info.ArgumentList.Add("-jar");
                 info.ArgumentList.Add(installerPath);
                 info.ArgumentList.Add("--installClient");
-                info.ArgumentList.Add(AppPaths.RootDir);
+                info.ArgumentList.Add(AppPaths.InstallRoot);
                 if (mirror) { info.ArgumentList.Add("--mirror"); info.ArgumentList.Add("https://bmclapi2.bangbang93.com/maven/"); }
                 try
                 {
@@ -571,10 +700,18 @@ namespace AuroraLauncher
                         var last = new DateTime(Interlocked.Read(ref lastOutputTicks), DateTimeKind.Utc);
                         var idle = (int)(DateTime.UtcNow - last).TotalSeconds;
                         var elapsed = (int)(DateTime.UtcNow - attemptStarted).TotalSeconds;
-                        if (idle > 90)
+                        var silent = false;
+                        lock (output) silent = output.Length == 0;
+                        // A healthy installer prints its first stage line within a
+                        // few seconds. Waiting the full 90s only makes the user
+                        // stare at 0% when the download source is dead.
+                        var idleLimit = silent ? 25 : 90;
+                        if (idle > idleLimit)
                         {
                             try { process.Kill(true); } catch { }
-                            throw new Exception($"安装器已经 {idle} 秒没有输出，已停止。将自动切换镜像/下载源重试。");
+                            throw new Exception(silent
+                                ? $"安装器启动后 {idle} 秒没有任何日志输出，已停止。将自动切换镜像/下载源重试。"
+                                : $"安装器已经 {idle} 秒没有输出，已停止。将自动切换镜像/下载源重试。");
                         }
                         if (elapsed > 8 * 60)
                         {
@@ -680,7 +817,7 @@ namespace AuroraLauncher
             return completed == task && process.HasExited;
         }
 
-        private static string SelectInstallerJava(string mcVersion)
+        internal static string SelectInstallerJava(string mcVersion)
         {
             var required = VersionService.JavaRequirement(mcVersion);
             var list = JavaService.Scan().OfType<JsonObject>()
@@ -696,7 +833,7 @@ namespace AuroraLauncher
 
         private static void EnsureLauncherProfiles()
         {
-            var file = Path.Combine(AppPaths.RootDir, "launcher_profiles.json");
+            var file = Path.Combine(AppPaths.InstallRoot, "launcher_profiles.json");
             if (File.Exists(file)) return;
             var json = new JsonObject
             {

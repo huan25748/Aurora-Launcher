@@ -11,7 +11,7 @@ namespace AuroraLauncher
 {
     internal static class MinecraftInstallService
     {
-        private static string VersionsDir => Path.Combine(AppPaths.RootDir, "versions");
+        private static string VersionsDir => Path.Combine(AppPaths.InstallRoot, "versions");
         private static string LibrariesDir => Path.Combine(AppPaths.RootDir, "libraries");
         private static string AssetsDir => Path.Combine(AppPaths.RootDir, "assets");
 
@@ -26,6 +26,18 @@ namespace AuroraLauncher
             var ownsProgress = false;
             var infoStep = "";
             var cleanupBefore = createInstance ? VersionCleanup.Snapshot() : null;
+            string? installRoot = null;
+            string? installFolder = null;
+            var completed = false;
+            if (createInstance && string.IsNullOrWhiteSpace(AppPaths.InstallRootOverride))
+            {
+                installFolder = ReserveFolder(string.IsNullOrWhiteSpace(instanceName) ? versionId : instanceName!);
+                installRoot = Path.Combine(AppPaths.RootDir, "versions", installFolder);
+                Directory.CreateDirectory(Path.Combine(installRoot, "versions"));
+                AppPaths.InstallRootOverride = installRoot;
+            }
+            try
+            {
             if (reportProgress)
             {
                 if (!ProgressService.IsActive) { ProgressService.Begin($"安装 {versionId}"); ownsProgress = true; }
@@ -158,10 +170,14 @@ namespace AuroraLauncher
                             if (string.IsNullOrWhiteSpace(hash) || hash.Length < 2) continue;
                             var assetPath = Path.Combine(AssetsDir, "objects", hash.Substring(0, 2), hash);
                             if (!seen.Add(assetPath)) continue;
+                            if (File.Exists(assetPath) && new FileInfo(assetPath).Length == size) continue;
                             assets.Add(($"https://resources.download.minecraft.net/{hash.Substring(0, 2)}/{hash}", assetPath, hash, size));
                         }
                         if (reportProgress) ProgressService.Step("下载游戏资源", assets.Count, assets.Count + " 个资源");
-                        await RunDownloads(assets, Concurrency(), token, (done, detail) => { if (reportProgress) ProgressService.Progress(done, detail); });
+                        await RunDownloads(assets, Concurrency(), token, null, (done, bytes, total, name) =>
+                        {
+                            if (reportProgress) ProgressService.Progress(done, $"{done}/{assets.Count} · 已下载 {FormatBytes(bytes)} · {name}");
+                        });
                         if (reportProgress) ProgressService.Update(assets.Count, "资源已下载");
                     }
                 }
@@ -175,11 +191,30 @@ namespace AuroraLauncher
                 Directory.CreateDirectory(Path.Combine(versionDir, "resourcepacks"));
                 Directory.CreateDirectory(Path.Combine(versionDir, "shaderpacks"));
                 Directory.CreateDirectory(Path.Combine(versionDir, "logs"));
-                instanceId = CreateInstance(versionId, instanceName ?? versionId, "vanilla", null, null, cleanupBefore);
+                instanceId = CreateInstance(versionId, instanceName ?? versionId, "vanilla", null, null, cleanupBefore,
+                    installFolder, installRoot != null ? Path.Combine(installRoot, "versions") : null);
             }
             if (reportProgress && ownsProgress) ProgressService.Complete();
 
+            completed = true;
             return new JsonObject { ["instanceId"] = instanceId, ["versionId"] = versionId };
+            }
+            finally
+            {
+                if (installRoot != null)
+                {
+                    AppPaths.InstallRootOverride = null;
+                    if (completed)
+                    {
+                        try { Directory.Delete(Path.Combine(installRoot, "versions"), true); } catch { }
+                        try { File.Delete(Path.Combine(installRoot, "launcher_profiles.json")); } catch { }
+                    }
+                    else
+                    {
+                        try { Directory.Delete(installRoot, true); } catch { }
+                    }
+                }
+            }
         }
 
         internal static string FormatBytes(long bytes)
@@ -230,11 +265,14 @@ namespace AuroraLauncher
             }
             if (assets.Count == 0) return;
             ProgressService.Step("下载游戏资源", assets.Count, assets.Count + " 个资源");
-            await RunDownloads(assets, Concurrency(), token, (done, detail) => ProgressService.Progress(done, detail));
+            await RunDownloads(assets, Concurrency(), token, null, (done, bytes, total, name) =>
+            {
+                ProgressService.Progress(done, $"{done}/{assets.Count} · 已下载 {FormatBytes(bytes)} · {name}");
+            });
             ProgressService.Update(assets.Count, "资源已下载");
         }
 
-        private static async Task RunDownloads(List<(string Url, string Path, string? Sha1, long Size)> files, int concurrency, CancellationToken token, Action<int, string>? progress = null)
+        private static async Task RunDownloads(List<(string Url, string Path, string? Sha1, long Size)> files, int concurrency, CancellationToken token, Action<int, string>? progress = null, Action<int, long, long, string>? byteProgress = null)
         {
             using var gate = new SemaphoreSlim(Math.Max(1, concurrency));
             var done = 0;
@@ -257,8 +295,9 @@ namespace AuroraLauncher
                         if (delta <= 0) return;
                         last = received;
                         var aggregate = System.Threading.Interlocked.Add(ref downloadedBytes, delta);
-                        progress?.Invoke(System.Threading.Volatile.Read(ref done),
-                            $"{System.Threading.Volatile.Read(ref done)}/{files.Count} · {SizeText(aggregate)} · {name}");
+                        var completed = System.Threading.Volatile.Read(ref done);
+                        progress?.Invoke(completed, $"{completed}/{files.Count} · {SizeText(aggregate)} · {name}");
+                        byteProgress?.Invoke(completed, aggregate, totalBytes, name);
                     });
                     ok = true;
                 }
@@ -308,7 +347,7 @@ namespace AuroraLauncher
             return allowed;
         }
 
-        public static string CreateInstance(string versionId, string name, string loader = "vanilla", string? loaderVersion = null, string? mcVersion = null, HashSet<string>? cleanupBefore = null)
+        public static string CreateInstance(string versionId, string name, string loader = "vanilla", string? loaderVersion = null, string? mcVersion = null, HashSet<string>? cleanupBefore = null, string? forcedFolder = null, string? sourceVersionsRoot = null)
         {
             var instances = AppPaths.InstancesDir;
             Directory.CreateDirectory(instances);
@@ -316,32 +355,56 @@ namespace AuroraLauncher
             var id = "inst-" + Guid.NewGuid().ToString("N")[..12];
             var directory = Path.Combine(instances, id);
             Directory.CreateDirectory(directory);
+            try { File.WriteAllText(Path.Combine(directory, ".pclignore"), "安装中，完成后自动删除"); } catch { }
 
             // Old Aurora creates a self-contained version folder under versions/<name>:
             // merged version JSON plus the client jar. The installer's intermediate
             // versions can then be removed without breaking the instance.
-            var chain = LaunchService.LoadVersionChain(versionId);
+            var sourceVersions = sourceVersionsRoot ?? Path.Combine(AppPaths.InstallRoot, "versions");
+            var outputVersions = Path.Combine(AppPaths.RootDir, "versions");
+            Directory.CreateDirectory(outputVersions);
+            var chain = LaunchService.LoadVersionChainFrom(sourceVersions, versionId);
             var baseName = SafeFolderName(name);
-            var folder = baseName;
+            var folder = forcedFolder ?? baseName;
             var suffix = 2;
-            while (Directory.Exists(Path.Combine(VersionsDir, folder)))
+            if (forcedFolder == null)
             {
-                folder = baseName + "-" + suffix;
-                suffix++;
+                while (Directory.Exists(Path.Combine(outputVersions, folder)))
+                {
+                    folder = baseName + "-" + suffix;
+                    suffix++;
+                }
             }
-            var gameDir = Path.Combine(VersionsDir, folder);
+            var gameDir = Path.Combine(outputVersions, folder);
             Directory.CreateDirectory(gameDir);
             var standalone = (JsonObject)chain.DeepCloneCompat()!;
             standalone["id"] = folder;
             standalone.Remove("inheritsFrom");
-            var mainClass = standalone["mainClass"]?.GetValue<string>() ?? "";
-            var moduleLoader = mainClass.Contains("cpw.mods.bootstraplauncher", StringComparison.OrdinalIgnoreCase)
-                || mainClass.Contains("net.minecraftforge.bootstrap", StringComparison.OrdinalIgnoreCase)
-                || mainClass.Contains("net.neoforged.bootstrap", StringComparison.OrdinalIgnoreCase);
-            var sourceJar = LaunchService.FindClientJar(versionId);
-            if (!moduleLoader && sourceJar != null)
+            var instanceJar = Path.Combine(gameDir, folder + ".jar");
+            if (!File.Exists(instanceJar) || new FileInfo(instanceJar).Length == 0)
             {
-                try { File.Copy(sourceJar, Path.Combine(gameDir, folder + ".jar"), true); } catch { }
+                // PCL always materialises the instance jar (vanilla client jar) next
+                // to the merged JSON, including Forge/NeoForge BootstrapLauncher.
+                var sourceJar = LaunchService.FindClientJarFrom(sourceVersions, versionId);
+                if (sourceJar != null)
+                {
+                    try { File.Copy(sourceJar, instanceJar, true); } catch { }
+                }
+                else
+                {
+                    var client = standalone["downloads"]?["client"] as JsonObject;
+                    var url = client?["url"]?.GetValue<string>() ?? "";
+                    if (!string.IsNullOrWhiteSpace(url))
+                    {
+                        try
+                        {
+                            DownloadService.Download(url, instanceJar, client?["sha1"]?.GetValue<string>(),
+                                client?["size"]?.GetValue<long>() ?? 0, System.Threading.CancellationToken.None)
+                                .GetAwaiter().GetResult();
+                        }
+                        catch { }
+                    }
+                }
             }
             File.WriteAllText(Path.Combine(gameDir, folder + ".json"), standalone.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             foreach (var sub in new[] { "mods", "saves", "resourcepacks", "shaderpacks", "logs", "crash-reports", "config" })
@@ -364,11 +427,26 @@ namespace AuroraLauncher
                 ["totalPlayTimeMs"] = 0,
                 ["playCount"] = 0
             };
+            try { File.Delete(Path.Combine(directory, ".pclignore")); } catch { }
             File.WriteAllText(Path.Combine(directory, "instance.json"), json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             if (cleanupBefore != null) VersionCleanup.Cleanup(cleanupBefore, folder);
+            if (!string.Equals(Path.GetFullPath(sourceVersions), Path.GetFullPath(outputVersions), StringComparison.OrdinalIgnoreCase))
+                try { VersionCleanup.CleanupSourceChain(versionId, folder); } catch { }
             if (ProgressService.IsActive) ProgressService.Update(1, "实例已创建");
             BridgeService.NotifyInstances();
             return id;
+        }
+
+        public static string ReserveFolder(string name)
+        {
+            var versionsDir = Path.Combine(AppPaths.RootDir, "versions");
+            Directory.CreateDirectory(versionsDir);
+            var baseName = SafeFolderName(name);
+            var folder = baseName;
+            var suffix = 2;
+            while (Directory.Exists(Path.Combine(versionsDir, folder))) { folder = baseName + "-" + suffix; suffix++; }
+            Directory.CreateDirectory(Path.Combine(versionsDir, folder));
+            return folder;
         }
 
         private static string SafeFolderName(string name)

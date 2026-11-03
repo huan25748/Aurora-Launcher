@@ -14,6 +14,10 @@ namespace AuroraLauncher
             set => _rootDir = string.IsNullOrWhiteSpace(value) ? Path.Combine(BaseDir, ".minecraft") : Path.GetFullPath(value);
         }
         public static string SettingsDir { get; } = Path.Combine(BaseDir, ".aurora");
+        // While an install runs, every version/libraries write is redirected here so
+        // versions/ only receives the final instance folder (PCL behaviour).
+        public static string? InstallRootOverride { get; set; }
+        public static string InstallRoot => string.IsNullOrWhiteSpace(InstallRootOverride) ? RootDir : Path.GetFullPath(InstallRootOverride!);
         public static string InstancesDir => Path.Combine(RootDir, "instances");
 
         public static void EnsureLayout()

@@ -9,8 +9,8 @@ namespace AuroraLauncher
 {
     internal static class NewsService
     {
-        private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        private static string CacheFile => Path.Combine(AppPaths.SettingsDir, "cache", "news-v5.json");
+        private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        private static string CacheFile => Path.Combine(AppPaths.SettingsDir, "cache", "news-v18.json");
 
         public static async Task<JsonArray> List(bool force)
         {
@@ -22,29 +22,49 @@ namespace AuroraLauncher
                     {
                         var cached = JsonNode.Parse(File.ReadAllText(CacheFile)) as JsonObject;
                         var at = cached?["at"]?.GetValue<long>() ?? 0;
-                        if (cached?["items"] is JsonArray items && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - at < 30 * 60 * 1000)
+                        if (cached?["items"] is JsonArray items && items.Count > 0)
+                        {
+                            var fresh = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - at < 30 * 60 * 1000;
+                            if (fresh) return (JsonArray)JsonNode.Parse(items.ToJsonString())!;
+                            // Serve stale data immediately, then refresh the cache
+                            // in the background so opening the home page never blocks.
+                            _ = Task.Run(() => List(true));
                             return (JsonArray)JsonNode.Parse(items.ToJsonString())!;
+                        }
                     }
                 }
                 catch { }
             }
             var result = new JsonArray();
-            var versionItems = await FetchBugjumpItems();
+            // Start the two independent remote fetches together so a slow
+            // source cannot push the whole news list past the bridge timeout.
+            var versionTask = FetchBugjumpItems();
+            var latestTask = FetchLatestNewsItem();
+            var versionItems = await versionTask;
             foreach (var versionItem in versionItems)
                 result.Add(JsonNode.Parse(versionItem.ToJsonString()));
             try
             {
+                var latest = await latestTask;
+                if (latest != null) result.Add(latest);
                 using var request = new HttpRequestMessage(HttpMethod.Get, "https://launchercontent.mojang.com/v2/news.json");
                 request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
                 using var response = await Http.SendAsync(request);
                 var json = JsonNode.Parse(await response.Content.ReadAsStringAsync()) as JsonObject;
                 if (json?["entries"] is JsonArray entries)
                 {
+                    var news = entries.OfType<JsonObject>()
+                        .Where(item => (item["newsType"] as JsonArray)?.Any(kind => kind?.GetValue<string>() == "News page") == true)
+                        .OrderByDescending(item => item["date"]?.GetValue<string>() ?? "")
+                        .Take(12).ToList();
+                    if (news.Count == 0) news = entries.OfType<JsonObject>().Take(12).ToList();
                     var index = 0;
-                    foreach (var item in entries)
+                    foreach (var entry in news)
                     {
-                        if (item is not JsonObject entry || index >= 12) break;
-                        var imagePath = entry["image"]?["url"]?.GetValue<string>();
+                        if (index >= 12) break;
+                        var imagePath = entry["image"]?["url"]?.GetValue<string>()
+                            ?? entry["playPageImage"]?["url"]?.GetValue<string>()
+                            ?? entry["newsPageImage"]?["url"]?.GetValue<string>();
                         var image = string.IsNullOrEmpty(imagePath) ? null : imagePath!.StartsWith("http") ? imagePath : "https://launchercontent.mojang.com" + imagePath;
                         result.Add(new JsonObject
                         {
@@ -53,6 +73,7 @@ namespace AuroraLauncher
                             ["summary"] = entry["text"]?.GetValue<string>() ?? entry["category"]?.GetValue<string>() ?? "",
                             ["content"] = entry["articleBody"]?.GetValue<string>() ?? "",
                             ["url"] = entry["readMoreLink"]?.GetValue<string>() ?? entry["newsPage"]?.GetValue<string>() ?? "",
+                            ["officialUrl"] = entry["readMoreLink"]?.GetValue<string>() ?? entry["newsPage"]?.GetValue<string>() ?? "",
                             ["date"] = entry["date"]?.GetValue<string>() ?? "",
                             ["image"] = image,
                             ["tag"] = entry["tag"]?.GetValue<string>() ?? entry["category"]?.GetValue<string>() ?? "",
@@ -86,39 +107,26 @@ namespace AuroraLauncher
             var result = new JsonArray();
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, "https://news.bugjump.net/apis/versions/latest");
-                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
-                request.Headers.Accept.ParseAdd("application/json");
-                using var response = await Http.SendAsync(request);
-                if (!response.IsSuccessStatusCode) return result;
-                var json = JsonNode.Parse(await response.Content.ReadAsStringAsync()) as JsonObject;
-                if (json == null) return result;
-                var release = json["release"] as JsonObject;
-                var snapshot = json["snapshot"] as JsonObject;
-                if (release != null) result.Add(await VersionItem(release, "最新版本", true, "release"));
-                if (snapshot != null)
+                var manifest = await VersionService.Manifest(false);
+                var releaseVersion = manifest["latest"]?["release"]?.GetValue<string>() ?? "";
+                var snapshotVersion = manifest["latest"]?["snapshot"]?.GetValue<string>() ?? "";
+                if (!string.IsNullOrWhiteSpace(releaseVersion))
                 {
-                    result.Add(await VersionItem(snapshot, "最新预览", false, "snapshot"));
-                }
-                else
-                {
-                    // bugjump 的 latest 只在“当前最新为快照”时返回 snapshot。
-                    // 这里补上 Mojang 清单中的最新快照，正文仍从 PCL2 新闻主页数据读取。
-                    try
+                    result.Add(await VersionItem(new JsonObject
                     {
-                        var manifest = await VersionService.Manifest(false);
-                        var latest = manifest["latest"]?["snapshot"]?.GetValue<string>() ?? "";
-                        if (!string.IsNullOrWhiteSpace(latest))
-                        {
-                            result.Add(await VersionItem(new JsonObject
-                            {
-                                ["version-id"] = latest,
-                                ["title"] = latest,
-                                ["official-link"] = "https://www.minecraft.net/zh-hans/article"
-                            }, "最新预览", false, "snapshot"));
-                        }
-                    }
-                    catch { }
+                        ["version-id"] = releaseVersion,
+                        ["title"] = releaseVersion,
+                        ["official-link"] = "https://www.minecraft.net/zh-hans/article"
+                    }, "最新版本", true, "release"));
+                }
+                if (!string.IsNullOrWhiteSpace(snapshotVersion) && snapshotVersion != releaseVersion)
+                {
+                    result.Add(await VersionItem(new JsonObject
+                    {
+                        ["version-id"] = snapshotVersion,
+                        ["title"] = snapshotVersion,
+                        ["official-link"] = "https://www.minecraft.net/zh-hans/article"
+                    }, "最新预览", false, "snapshot"));
                 }
             }
             catch { }
@@ -165,22 +173,186 @@ namespace AuroraLauncher
             var articleIndex = official.IndexOf("/article/", StringComparison.OrdinalIgnoreCase);
             if (articleIndex >= 0)
                 official = "https://www.minecraft.net/zh-hans/article/" + official[(articleIndex + 9)..];
-            var content = await FetchBugjumpArticle(version, fallbackType);
-            if (string.IsNullOrWhiteSpace(content)) content = intro;
+            // Official Mojang patch notes only.
+            var content = await FetchPatchNote(version);
             var image = Text(entry, "version-image-link");
-            if (string.IsNullOrWhiteSpace(image)) image = await FetchBugjumpImage(version, fallbackType);
+            if (string.IsNullOrWhiteSpace(image)) image = await FetchPatchImage(version);
+            if (string.IsNullOrWhiteSpace(content)) content = intro;
+            if (string.IsNullOrWhiteSpace(content)) content = "该版本暂未收录详细更新日志。";
+            if (official.EndsWith("/article", StringComparison.OrdinalIgnoreCase))
+                official += "/minecraft-java-edition-" + version.Replace(".", "-");
             return new JsonObject
             {
                 ["id"] = "bugjump-" + version,
                 ["title"] = $"Minecraft {title} 版本介绍",
                 ["summary"] = string.IsNullOrWhiteSpace(intro) ? $"Minecraft {title} 更新内容。" : intro,
                 ["content"] = content,
+                ["contentZh"] = null,
+                ["contentEn"] = content,
                 ["url"] = official,
+                ["officialUrl"] = official,
+                ["wikiUrl"] = "https://zh.minecraft.wiki/w/" + Uri.EscapeDataString("Java版" + version),
                 ["image"] = image,
                 ["tag"] = tag,
                 ["date"] = "",
                 ["pinned"] = pinned
             };
+        }
+
+        private static async Task<JsonObject?> FetchLatestNewsItem()
+        {
+            try
+            {
+                // Read the LATEST NEWS grid directly instead of downloading the
+                // whole homepage first; this keeps news:list inside its timeout.
+                var query = "/content/minecraftnet/language-masters/en-us/jcr:content/root/container/image_grid_a_copy_64.articles.page-1.json";
+                using var gridRequest = new HttpRequestMessage(HttpMethod.Get, "https://www.minecraft.net" + query);
+                gridRequest.Headers.UserAgent.ParseAdd("Mozilla/5.0");
+                using var gridResponse = await Http.SendAsync(gridRequest);
+                if (!gridResponse.IsSuccessStatusCode) return null;
+                var grid = JsonNode.Parse(await gridResponse.Content.ReadAsStringAsync()) as JsonObject;
+                var first = (grid?["article_grid"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault();
+                var tile = first?["default_tile"] as JsonObject;
+                if (tile == null) return null;
+                var url = first?["article_url"]?.GetValue<string>() ?? "";
+                var image = tile["image"]?["imageURL"]?.GetValue<string>() ?? "";
+                if (url.StartsWith("/")) url = "https://www.minecraft.net" + url;
+                if (image.StartsWith("/")) image = "https://www.minecraft.net" + image;
+                var latestContent = await FetchOfficialArticle(url);
+                return new JsonObject
+                {
+                    ["id"] = "latest-" + url.GetHashCode().ToString("x"),
+                    ["title"] = tile["title"]?.GetValue<string>() ?? "",
+                    ["summary"] = tile["sub_header"]?.GetValue<string>() ?? "",
+                    ["content"] = latestContent,
+                    ["contentEn"] = latestContent,
+                    ["url"] = url,
+                    ["officialUrl"] = url,
+                    ["image"] = image,
+                    ["tag"] = "最新",
+                    ["date"] = "",
+                    ["pinned"] = false
+                };
+            }
+            catch { return null; }
+        }
+
+        private static async Task<string> FetchOfficialArticle(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url) ||
+                !url.Contains("minecraft.net/", StringComparison.OrdinalIgnoreCase) ||
+                !url.Contains("/article/", StringComparison.OrdinalIgnoreCase))
+                return "";
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36");
+                using var response = await Http.SendAsync(request);
+                if (!response.IsSuccessStatusCode) return "";
+                var html = await response.Content.ReadAsStringAsync();
+                var start = html.IndexOf("MC_articleGridA_container", StringComparison.Ordinal);
+                if (start < 0) start = html.IndexOf("<article", StringComparison.OrdinalIgnoreCase);
+                if (start < 0) return "";
+                var textStart = html.IndexOf("<div class=\"article-text\"", start, StringComparison.Ordinal);
+                if (textStart >= 0) start = textStart;
+                var end = html.IndexOf("MC_globalFooter", start, StringComparison.Ordinal);
+                if (end <= start) end = Math.Min(html.Length, start + 60000);
+                var text = HtmlToText(html[start..end]);
+                // Stop before official boilerplate (links, share, newest news,
+                // disclaimers) that follows every article body.
+                foreach (var marker in new[] { "Helpful links:", "Share this story", "Newest News", "Disclaimers:" })
+                {
+                    var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                    if (index >= 0)
+                    {
+                        text = text[..index].TrimEnd();
+                        break;
+                    }
+                }
+                return text.Length > 120000 ? text[..120000].TrimEnd() + "…" : text;
+            }
+            catch { return ""; }
+        }
+
+        private static JsonArray? _patchEntries;
+
+        private static async Task<string> FetchPatchImage(string version)
+        {
+            try
+            {
+                if (_patchEntries == null)
+                {
+                    using var listRequest = new HttpRequestMessage(HttpMethod.Get,
+                        "https://launchercontent.mojang.com/v2/javaPatchNotes.json");
+                    listRequest.Headers.UserAgent.ParseAdd("AuroraLauncher/1.3.12");
+                    using var listResponse = await Http.SendAsync(listRequest);
+                    if (!listResponse.IsSuccessStatusCode) return "";
+                    var listJson = JsonNode.Parse(await listResponse.Content.ReadAsStringAsync()) as JsonObject;
+                    _patchEntries = listJson?["entries"] as JsonArray;
+                }
+                var normalized = version.Replace(".", "-");
+                var entry = _patchEntries?.OfType<JsonObject>().FirstOrDefault(item =>
+                    item["version"]?.GetValue<string>() == version ||
+                    item["id"]?.GetValue<string>() == normalized);
+                var image = entry?["image"]?["url"]?.GetValue<string>() ?? "";
+                if (string.IsNullOrWhiteSpace(image)) return "";
+                return image.StartsWith("http") ? image : "https://launchercontent.mojang.com" + image;
+            }
+            catch { return ""; }
+        }
+
+        private static async Task<string> FetchPatchNote(string version)
+        {
+            if (string.IsNullOrWhiteSpace(version)) return "";
+            try
+            {
+                if (_patchEntries == null)
+                {
+                    using var listRequest = new HttpRequestMessage(HttpMethod.Get,
+                        "https://launchercontent.mojang.com/v2/javaPatchNotes.json");
+                    listRequest.Headers.UserAgent.ParseAdd("AuroraLauncher/1.3.4");
+                    using var listResponse = await Http.SendAsync(listRequest);
+                    if (!listResponse.IsSuccessStatusCode) return "";
+                    var listJson = JsonNode.Parse(await listResponse.Content.ReadAsStringAsync()) as JsonObject;
+                    _patchEntries = listJson?["entries"] as JsonArray;
+                }
+                if (_patchEntries == null) return "";
+                var normalized = version.Replace(".", "-");
+                var entry = _patchEntries.OfType<JsonObject>().FirstOrDefault(item =>
+                    item["version"]?.GetValue<string>() == version ||
+                    item["id"]?.GetValue<string>() == normalized);
+                var path = entry?["contentPath"]?.GetValue<string>() ?? "";
+                if (string.IsNullOrWhiteSpace(path)) return "";
+                using var contentRequest = new HttpRequestMessage(HttpMethod.Get,
+                    "https://launchercontent.mojang.com/v2/" + path.TrimStart('/'));
+                contentRequest.Headers.UserAgent.ParseAdd("AuroraLauncher/1.3.4");
+                using var contentResponse = await Http.SendAsync(contentRequest);
+                if (!contentResponse.IsSuccessStatusCode) return "";
+                var contentJson = JsonNode.Parse(await contentResponse.Content.ReadAsStringAsync()) as JsonObject;
+                var html = contentJson?["body"]?.GetValue<string>() ?? "";
+                var text = HtmlToText(html);
+                return text.Length > 200000 ? text[..200000].TrimEnd() + "…" : text;
+            }
+            catch { return ""; }
+        }
+
+        private static string HtmlToText(string html)
+        {
+            if (string.IsNullOrWhiteSpace(html)) return "";
+            var text = System.Text.RegularExpressions.Regex.Replace(html,
+                @"<(script|style)[^>]*>.*?</\1>", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"<li[^>]*>", "\n• ", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"</?(h1|h2|h3|h4|p|ul|ol|div|br)[^>]*>", "\n\n", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"<[^>]+>", "", System.Text.RegularExpressions.RegexOptions.Singleline);
+            for (var decode = 0; decode < 3; decode++)
+            {
+                var decoded = System.Net.WebUtility.HtmlDecode(text);
+                if (decoded == text) break;
+                text = decoded;
+            }
+            var lines = text.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToArray();
+            return string.Join("\n", lines);
         }
 
         private static async Task<string> FetchBugjumpImage(string version, string fallbackType)
@@ -207,9 +379,10 @@ namespace AuroraLauncher
                     {
                         using var request = new HttpRequestMessage(HttpMethod.Get, url);
                         request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.2");
-                        using var response = await Http.SendAsync(request);
+                        using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(2));
+                        using var response = await Http.SendAsync(request, cts.Token);
                         if (!response.IsSuccessStatusCode) continue;
-                        var text = await response.Content.ReadAsStringAsync();
+                        var text = await response.Content.ReadAsStringAsync(cts.Token);
                         var match = System.Text.RegularExpressions.Regex.Match(text,
                             @"^version-image-link:\s*(\S+)\s*$",
                             System.Text.RegularExpressions.RegexOptions.Multiline);
@@ -248,9 +421,10 @@ namespace AuroraLauncher
                     {
                         using var request = new HttpRequestMessage(HttpMethod.Get, url);
                         request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.1");
-                        using var response = await Http.SendAsync(request);
+                        using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(3));
+                        using var response = await Http.SendAsync(request, cts.Token);
                         if (!response.IsSuccessStatusCode) continue;
-                        text = await response.Content.ReadAsStringAsync();
+                        text = await response.Content.ReadAsStringAsync(cts.Token);
                         if (!string.IsNullOrWhiteSpace(text)) break;
                     }
                     catch { }
@@ -261,7 +435,13 @@ namespace AuroraLauncher
                 text = System.Text.RegularExpressions.Regex.Replace(text, @"^#{1,6}\s*", "",
                     System.Text.RegularExpressions.RegexOptions.Multiline);
                 text = text.Replace("**", "").Replace("`", "");
-                return text.Length > 60000 ? text[..60000].TrimEnd() + "…" : text;
+                for (var decode = 0; decode < 3; decode++)
+                {
+                    var decoded = System.Net.WebUtility.HtmlDecode(text);
+                    if (decoded == text) break;
+                    text = decoded;
+                }
+                return text.Length > 200000 ? text[..200000].TrimEnd() + "…" : text;
             }
             catch { return ""; }
         }
@@ -313,30 +493,9 @@ namespace AuroraLauncher
                     wikiText = wikiText.Replace("\r\n", "\n").Trim();
                     return wikiText.Length > 30000 ? wikiText[..30000].TrimEnd() + "…" : wikiText;
                 }
-                using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-                request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36");
-                using var response = await Http.SendAsync(request);
-                if (!response.IsSuccessStatusCode) return "";
-                var html = await response.Content.ReadAsStringAsync();
-                var article = System.Text.RegularExpressions.Regex.Match(html,
-                    @"<article[^>]*>(.*?)</article>",
-                    System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (!article.Success)
-                    article = System.Text.RegularExpressions.Regex.Match(html,
-                        @"<main[^>]*>(.*?)</main>",
-                        System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                var body = article.Success ? article.Groups[1].Value : html;
-                body = System.Text.RegularExpressions.Regex.Replace(body,
-                    @"<(script|style|nav|header|footer)[^>]*>.*?</\1>", "",
-                    System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                body = System.Text.RegularExpressions.Regex.Replace(body, @"<[^>]+>", "\n");
-                body = System.Net.WebUtility.HtmlDecode(body);
-                var lines = body.Split('\n')
-                    .Select(line => line.Trim())
-                    .Where(line => line.Length > 0)
-                    .ToArray();
-                var text = string.Join("\n\n", lines);
-                return text.Length > 16000 ? text[..16000].TrimEnd() + "…" : text;
+                // Official articles are loaded lazily when the user opens the
+                // modal; the LATEST NEWS list itself stays fast.
+                return await FetchOfficialArticle(url);
             }
             catch { return ""; }
         }

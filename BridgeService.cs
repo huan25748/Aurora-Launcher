@@ -25,7 +25,8 @@ namespace AuroraLauncher
                 ["theme"] = "system",
                 ["accent"] = "aurora",
                 ["downloadSource"] = "auto",
-                ["modrinthSource"] = "mirror",
+                ["downloadEngine"] = "builtin",
+                ["modrinthSource"] = "auto",
                 ["optifineSource"] = "auto",
                 ["downloadSources"] = new JsonObject(),
                 ["maxConcurrency"] = 32,
@@ -42,7 +43,7 @@ namespace AuroraLauncher
                 ["jvmArgs"] = "",
                 ["gameArgs"] = "",
                 ["javaPath"] = "",
-                ["msClientId"] = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb",
+                ["msClientId"] = "ff7e81d4-c1ab-4520-a957-9bccc7a2c704",
                 ["enableStats"] = true,
                 ["lastSelectedInstanceId"] = "",
                 ["onboardingDone"] = true,
@@ -68,6 +69,15 @@ namespace AuroraLauncher
                             var merged = DefaultSettings();
                             foreach (var pair in stored)
                                 merged[pair.Key] = CloneNode(pair.Value);
+                            // 旧版本的默认值是 mirror，很多人没手动选过。
+                            // 迁移一次到「自动」，否则会被固定走慢镜像。
+                            if (stored["modrinthSource"]?.GetValue<string>() == "mirror"
+                                && stored["modrinthSourceAutoMigrated"]?.GetValue<bool>() != true)
+                            {
+                                merged["modrinthSource"] = "auto";
+                                merged["modrinthSourceAutoMigrated"] = true;
+                                try { File.WriteAllText(ConfigFile, merged.ToJsonString(new JsonSerializerOptions { WriteIndented = true })); } catch { }
+                            }
                             return merged;
                         }
                     }
@@ -121,11 +131,74 @@ namespace AuroraLauncher
                 try
                 {
                     if (JsonNode.Parse(File.ReadAllText(file)) is JsonObject instance)
+                    {
+                        RepairInstanceVersion(instance, file);
                         result.Add(CloneNode(instance));
+                    }
                 }
                 catch { }
             }
             return result;
+        }
+
+        private static void RepairInstanceVersion(JsonObject instance, string file)
+        {
+            try
+            {
+                var changed = false;
+                var name = instance["name"]?.GetValue<string>() ?? "";
+                var versionId = instance["versionId"]?.GetValue<string>() ?? "";
+                var mcVersion = instance["mcVersion"]?.GetValue<string>() ?? "";
+                if (string.Equals(mcVersion, name, StringComparison.Ordinal) || string.Equals(mcVersion, versionId, StringComparison.Ordinal) || string.IsNullOrWhiteSpace(mcVersion))
+                {
+                    var jsonFile = Path.Combine(AppPaths.RootDir, "versions", versionId, versionId + ".json");
+                    if (File.Exists(jsonFile) && JsonNode.Parse(File.ReadAllText(jsonFile)) is JsonObject json)
+                    {
+                        var candidate = json["clientVersion"]?.GetValue<string>() ?? json["inheritsFrom"]?.GetValue<string>() ?? versionId;
+                        var match = System.Text.RegularExpressions.Regex.Match(candidate, "\\d+\\.\\d+(?:\\.\\d+)?");
+                        if (match.Success) { instance["mcVersion"] = match.Value; changed = true; }
+                    }
+                }
+                if (RepairLoaderVersion(instance)) changed = true;
+                if (string.IsNullOrWhiteSpace(instance["iconPath"]?.GetValue<string>())) InstanceIconService.EnsureLocal(instance, file);
+                if (changed) File.WriteAllText(file, instance.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { }
+        }
+
+        private static bool RepairLoaderVersion(JsonObject instance)
+        {
+            try
+            {
+                var versionId = instance["versionId"]?.GetValue<string>() ?? "";
+                var current = versionId;
+                for (var depth = 0; depth < 5 && !string.IsNullOrWhiteSpace(current); depth++)
+                {
+                    var jsonFile = Path.Combine(AppPaths.RootDir, "versions", current, current + ".json");
+                    if (!File.Exists(jsonFile)) return false;
+                    var json = JsonNode.Parse(File.ReadAllText(jsonFile)) as JsonObject;
+                    var args = (json?["arguments"]?["game"] as JsonArray)?.OfType<JsonValue>().Select(v => v.GetValue<string>()).ToList() ?? new List<string>();
+                    string? Next(string key)
+                    {
+                        var index = args.IndexOf(key);
+                        return index >= 0 && index + 1 < args.Count ? args[index + 1] : null;
+                    }
+                    var neo = Next("--fml.neoForgeVersion");
+                    var forge = Next("--fml.forgeVersion");
+                    var mc = Next("--fml.mcVersion");
+                    if (!string.IsNullOrWhiteSpace(mc)) instance["mcVersion"] = mc;
+                    if (!string.IsNullOrWhiteSpace(neo)) { instance["loader"] = "neoforge"; instance["loaderVersion"] = neo; return true; }
+                    if (!string.IsNullOrWhiteSpace(forge)) { instance["loader"] = "forge"; instance["loaderVersion"] = forge; return true; }
+                    var text = json?.ToJsonString() ?? "";
+                    var fabric = System.Text.RegularExpressions.Regex.Match(text, "net\\.fabricmc:fabric-loader:([^:\"]+)");
+                    var quilt = System.Text.RegularExpressions.Regex.Match(text, "org\\.quiltmc:quilt-loader:([^:\"]+)");
+                    if (fabric.Success) { instance["loader"] = "fabric"; instance["loaderVersion"] = fabric.Groups[1].Value; return true; }
+                    if (quilt.Success) { instance["loader"] = "quilt"; instance["loaderVersion"] = quilt.Groups[1].Value; return true; }
+                    current = json?["inheritsFrom"]?.GetValue<string>() ?? "";
+                }
+            }
+            catch { }
+            return false;
         }
 
         public static JsonNode? GetInstance(string id)
@@ -163,6 +236,40 @@ namespace AuroraLauncher
             return null;
         }
 
+
+        public static bool SetOnlineMode(string id, bool enabled)
+        {
+            if (!Directory.Exists(AppPaths.InstancesDir)) return false;
+            foreach (var directory in Directory.GetDirectories(AppPaths.InstancesDir))
+            {
+                var file = Path.Combine(directory, "instance.json");
+                if (!File.Exists(file)) continue;
+                try
+                {
+                    if (JsonNode.Parse(File.ReadAllText(file)) is not JsonObject instance) continue;
+                    if (instance["id"]?.GetValue<string>() != id) continue;
+                    var gameDir = instance["gameDir"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrWhiteSpace(gameDir)) return false;
+                    var properties = Path.Combine(gameDir, "server.properties");
+                    var lines = File.Exists(properties) ? File.ReadAllLines(properties).ToList() : new List<string>();
+                    var replaced = false;
+                    for (var i = 0; i < lines.Count; i++)
+                    {
+                        if (lines[i].StartsWith("online-mode=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            lines[i] = "online-mode=" + (enabled ? "true" : "false");
+                            replaced = true;
+                        }
+                    }
+                    if (!replaced) lines.Add("online-mode=" + (enabled ? "true" : "false"));
+                    File.WriteAllLines(properties, lines);
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         public static JsonObject AppInfo()
         {
             JsonArray instances;
@@ -183,7 +290,7 @@ namespace AuroraLauncher
             catch { }
             return new JsonObject
             {
-                ["version"] = typeof(BridgeService).Assembly.GetName().Version?.ToString(3) ?? "1.2.25",
+                ["version"] = VersionInfo.Format(typeof(BridgeService).Assembly.GetName().Version),
                 ["electron"] = "",
                 ["chrome"] = "",
                 ["node"] = "",
@@ -226,6 +333,10 @@ namespace AuroraLauncher
         {
             switch (channel)
             {
+                case "mcmod:english":
+                    return await McmodService.English(ArgString(args, 0));
+                case "mcmod:search":
+                    return await McmodService.Search(ArgString(args, 0), ArgString(args, 1));
                 case "modrinth:search":
                     return await ModrinthService.Search(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "modrinth:project":
@@ -399,10 +510,19 @@ namespace AuroraLauncher
                     NotifyInstances();
                     return GetInstance(newId);
                 }
+                case "app:pick-folder":
+                    return SystemService.PickFolder();
                 case "instances:export":
                     return InstanceArchiveService.Export(ArgString(args, 0));
                 case "instances:export-pack":
-                    return InstanceArchiveService.ExportPack(ArgString(args, 0));
+                {
+                    if (args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.Object)
+                    {
+                        var options = JsonNode.Parse(args[0].GetRawText()) as JsonObject;
+                        return await InstanceArchiveService.ExportPack(options?["id"]?.GetValue<string>() ?? "", options);
+                    }
+                    return await InstanceArchiveService.ExportPack(ArgString(args, 0));
+                }
                 case "instances:import":
                     return await InstanceArchiveService.Import();
                 case "instances:import-existing":
@@ -419,14 +539,37 @@ namespace AuroraLauncher
                     return await CurseForgeService.Categories(ArgString(args, 0));
                 case "curseforge:project":
                     return await CurseForgeService.Project(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0);
+                case "curseforge:file-count":
+                    return await CurseForgeService.FileCount(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0);
+                case "curseforge:files-page":
+                    return await CurseForgeService.FilesPage(
+                        args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0,
+                        args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 1 ? args[1].GetInt32() : 0,
+                        args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 2 ? args[2].GetInt32() : 1000);
                 case "curseforge:files":
                     return await CurseForgeService.Files(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0, ArgString(args, 1), ArgString(args, 2));
+                case "mods:dependencies":
+                    return await DependencyService.Plan(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install":
                     return await CurseForgeService.Install(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install-pack":
                     return await CurseForgeService.InstallPack(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install-folder":
                     return await CurseForgeService.InstallToFolder(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
+                case "terracotta:install":
+                    return await TerracottaService.Ensure(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.True, CancellationToken.None);
+                case "terracotta:start":
+                    return await TerracottaService.Start();
+                case "terracotta:state":
+                    return await TerracottaService.State();
+                case "terracotta:host":
+                    return await TerracottaService.Host(ArgString(args, 0));
+                case "terracotta:join":
+                    return await TerracottaService.Join(ArgString(args, 0), ArgString(args, 1));
+                case "terracotta:reset":
+                    return await TerracottaService.Reset();
+                case "terracotta:stop":
+                    return await TerracottaService.Stop();
                 case "easytier:status":
                     return EasyTierService.Status();
                 case "easytier:lan-scan":
@@ -475,6 +618,8 @@ namespace AuroraLauncher
                     try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + directory + "\"") { UseShellExecute = true }); } catch { }
                     return null;
                 }
+                case "instances:online-mode":
+                    return args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 1 && SetOnlineMode(args[0].GetString() ?? "", args[1].GetBoolean());
                 case "instances:update":
                     return args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 1
                         ? UpdateInstance(args[0].GetString() ?? "", args[1])
@@ -556,7 +701,7 @@ namespace AuroraLauncher
                         args.GetArrayLength() < 2 || args[1].ValueKind != JsonValueKind.False,
                         args.GetArrayLength() > 2 ? args[2].GetString() : null);
                 case "content:list":
-                    return ContentService.List(ArgString(args, 0), ArgString(args, 1));
+                    return await ContentService.List(ArgString(args, 0), ArgString(args, 1));
                 case "content:worlds":
                     return ContentService.Worlds(ArgString(args, 0));
                 case "content:screenshots":
@@ -574,6 +719,8 @@ namespace AuroraLauncher
                 case "content:delete-world":
                     ContentService.DeleteWorld(ArgString(args, 0), ArgString(args, 1));
                     return null;
+                case "skin:install":
+                    return await SkinPatchService.Install(ArgString(args, 0));
                 case "accounts:list":
                     await AccountAvatarService.RefreshAll();
                     return AccountService.List();

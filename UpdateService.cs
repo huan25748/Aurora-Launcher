@@ -16,7 +16,7 @@ namespace AuroraLauncher
         private const string ReleasesUrl = "https://gitee.com/mobai-33460/aurora-launcher/releases";
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
 
-        private static string CurrentVersion => typeof(UpdateService).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        private static string CurrentVersion => VersionInfo.Format(typeof(UpdateService).Assembly.GetName().Version);
 
         public static async Task<JsonObject> Check(bool force)
         {
@@ -55,7 +55,9 @@ namespace AuroraLauncher
             var step = ProgressService.Step("下载启动器", 1, "连接 Gitee Releases");
             try
             {
-                using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.UserAgent.ParseAdd("AuroraLauncher-Updater");
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 response.EnsureSuccessStatusCode();
                 var total = response.Content.Headers.ContentLength ?? 0;
                 await using (var input = await response.Content.ReadAsStreamAsync())
@@ -91,15 +93,22 @@ namespace AuroraLauncher
             var script = Path.Combine(Path.GetTempPath(), $"aurora-update-{Guid.NewGuid():N}.cmd");
             var pid = Environment.ProcessId;
             var content = $@"@echo off
-:wait
-tasklist /FI ""PID eq {pid}"" 2>nul | find ""{pid}"" >nul
-if not errorlevel 1 (
+setlocal
+set /a tries=0
+:retry
+copy /y ""{newFile}"" ""{current}"" >nul 2>&1
+if errorlevel 1 (
+  set /a tries+=1
+  if %tries% geq 120 goto fail
   timeout /t 1 /nobreak >nul
-  goto wait
+  goto retry
 )
-copy /y ""{newFile}"" ""{current}"" >nul
 start """" ""{current}""
 del ""%~f0""
+exit /b 0
+:fail
+del ""%~f0""
+exit /b 1
 ";
             File.WriteAllText(script, content);
             Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + script + "\"")
