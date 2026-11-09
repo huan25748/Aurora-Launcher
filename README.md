@@ -12,7 +12,7 @@ Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
 
 - Gitee Releases：<https://gitee.com/mobai-33460/aurora-launcher/releases>
 - 蓝奏云：<https://mobaijianhe.lanzouc.com/b01euviyte>
-- 更新日志：[CHANGELOG.md](CHANGELOG.md)
+- 更新日志：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 
 ---
 
@@ -166,6 +166,7 @@ https://www.minecraft.net/zh-hans/article
 
 - 刷新按钮点击后禁用并显示「刷新中…」，成功或失败都会提示。
 
+
 ### 启动
 
 - 版本 chain 合并。
@@ -227,6 +228,28 @@ log4j / ModLauncher 签名不匹配
 ```
 
 配置、账户和日志与游戏数据分离，移动启动器目录时可整体迁移。
+
+---
+
+## 源码结构
+
+```text
+src/
+├─ Core/       IPC、资源包、日志、进度、路径
+├─ Accounts/   微软与第三方账户、皮肤与披风
+├─ Download/   CurseForge / Modrinth / 多源下载
+├─ Instances/  实例、加载器、Java、整合包导入导出
+├─ Network/    服务器 Ping、局域网扫描、联机
+├─ System/     系统信息、内存优化、更新、新闻
+└─ Launch/     启动与版本链
+
+renderer/      界面资源（打包进 assets.zip）
+web/           WebView 桥接脚本
+lib/           WebView2 SDK 程序集
+assets/        静态资源
+docs/          文档与更新日志
+release/       发布产物
+```
 
 ---
 
