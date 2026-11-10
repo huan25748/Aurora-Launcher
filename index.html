@@ -201,14 +201,14 @@
 
   <section class="hero">
     <div>
-      <span class="pill"><span class="dot"></span> 2.0.1 正式版 · Windows x64</span>
-      <h1>一个高质量、完整的<br><span class="grad">Minecraft 启动器</span></h1>
+      <span class="pill"><span class="dot"></span> 2.1.0 正式版 · Windows x64</span>
+      <h1>一个克制、完整的<br><span class="grad">Minecraft 启动器</span></h1>
       <p class="lead">
         Aurora Launcher 使用 .NET 6 + WPF + WebView2 重写，安装、下载、账户、联机与实例管理都在原生后端完成。
         支持原版与 Fabric / Quilt / Forge / NeoForge / OptiFine，内置 Modrinth 与 CurseForge 内容管理。
       </p>
       <div class="hero-actions">
-        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/download/2.0.1/AuroraLauncher.exe" target="_blank" rel="noopener">
+        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/latest" target="_blank" rel="noopener">
           下载最新版
         </a>
         <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">
@@ -252,8 +252,8 @@
   <section id="features">
     <div class="head">
       <div class="eyebrow">Features</div>
-      <h2>该有的都有</h2>
-      <p>从安装到联机，功能都落在同一套原生后端里。</p>
+      <h2>该有的都有，不该有的不加</h2>
+      <p>从安装到联机，功能都落在同一套原生后端里，界面保持中性、扁平、克制。</p>
     </div>
 
     <div class="grid g3">
@@ -288,7 +288,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M8 4v16"/></svg>
         </div>
         <h3>内容管理</h3>
-        <p>Modrinth 与 CurseForge 的搜索、详情、版本、安装。</p>
+        <p>Modrinth 与 CurseForge 的搜索、详情、版本、安装，界面与网页版保持一致。</p>
         <ul>
           <li>模组 / 资源包 / 光影 / 数据包 / 世界</li>
           <li>前置依赖弹窗，可选依赖默认不勾选</li>
@@ -322,6 +322,7 @@
           <li>导出按 PCL 流程生成 mrpack 或 zip</li>
           <li>已识别文件写入清单，不重复打包</li>
           <li>支持整个 .minecraft 压缩的整合包</li>
+          <li>整合包拖进窗口即安装（.zip / .mrpack / CurseForge）</li>
         </ul>
       </div>
 
@@ -349,7 +350,7 @@
         <p style="color:var(--soft);margin:0">
           最新版发布在 Gitee Releases，历史版本全部保留，可随时回退。
         </p>
-        <div class="ver">当前版本 <b>2.0.1</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
+        <div class="ver">当前版本 <b>2.1.0</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/latest" target="_blank" rel="noopener">前往 Gitee 下载最新版</a>
           <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">历史版本</a>
@@ -405,7 +406,7 @@
 
     <details>
       <summary>能导入 PCL / HMCL 的实例吗？</summary>
-      <p>可以。启动时会扫描游戏目录下的 <code>versions</code> 并自动登记尚未导入的版本，也可手动导入整合包（.mrpack、zip 或整个 .minecraft 压缩包）。</p>
+      <p>可以。启动时会扫描游戏目录下的 <code>versions</code> 并自动登记尚未导入的版本，也可以把整合包（.mrpack、zip、CurseForge 或整个 .minecraft 压缩包）直接拖进窗口，或拖到启动器图标上，自动识别并安装。</p>
     </details>
 
     <details>
