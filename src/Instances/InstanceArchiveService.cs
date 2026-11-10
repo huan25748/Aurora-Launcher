@@ -254,6 +254,14 @@ namespace AuroraLauncher
             var paths = selected["paths"] as JsonArray;
             if (paths == null || paths.Count == 0) return null;
             var source = paths[0]?.GetValue<string>() ?? throw new Exception("文件路径为空");
+            return await ImportFromPath(source);
+        }
+
+        /// <summary>按文件路径导入整合包（拖拽、命令行、文件关联共用）。</summary>
+        public static async Task<JsonObject?> ImportFromPath(string source)
+        {
+            if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+                throw new Exception("整合包文件不存在：" + source);
             var isModrinthPack = false;
             try
             {

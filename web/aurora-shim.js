@@ -13,6 +13,30 @@
   const post = (payload) => {
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(payload)
   }
+  let dropOverlay = null
+  const updateDropOverlay = (active) => {
+    if (!active) {
+      if (dropOverlay) { dropOverlay.remove(); dropOverlay = null }
+      return
+    }
+    if (dropOverlay) return
+    dropOverlay = document.createElement('div')
+    dropOverlay.id = 'aurora-drop-overlay'
+    dropOverlay.style.cssText = 'position:fixed;inset:0;z-index:2147483000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(8,10,14,.62);backdrop-filter:blur(3px);color:#f4f7fb;pointer-events:none;font-family:inherit;'
+    const icon = document.createElement('div')
+    icon.style.cssText = 'width:56px;height:56px;border-radius:16px;border:2px dashed rgba(255,255,255,.55);display:flex;align-items:center;justify-content:center;font-size:26px;'
+    icon.textContent = '📦'
+    const title = document.createElement('div')
+    title.textContent = '松开安装整合包'
+    title.style.cssText = 'font-size:24px;font-weight:700;letter-spacing:1px;'
+    const hint = document.createElement('div')
+    hint.textContent = '支持 .zip / .mrpack / CurseForge 整合包'
+    hint.style.cssText = 'font-size:13px;color:rgba(230,238,250,.75);'
+    dropOverlay.appendChild(icon)
+    dropOverlay.appendChild(title)
+    dropOverlay.appendChild(hint)
+    document.body.appendChild(dropOverlay)
+  }
   const pending = new Map()
   let nextInvokeId = 1
   if (window.chrome && window.chrome.webview) {
@@ -20,6 +44,7 @@
       const message = event.data
       if (!message) return
       if (message.type === 'event') {
+        if (message.name === 'drag-state') { updateDropOverlay(Boolean(message.payload && message.payload.active)); return }
         ;(listeners[message.name] || []).forEach((cb) => { try { cb(message.payload) } catch (error) { console.error(error) } })
         return
       }
@@ -209,6 +234,10 @@
       check: async (force) => { try { return await invoke('updates:check', force) } catch { return { currentVersion: '1.1.0', latestVersion: '1.1.0', hasUpdate: false, releaseUrl: '', title: '', notes: '' } } },
       downloadAndApply: async (url, version) => { return await invoke('updates:download', url, version) }
     },
+    memory: {
+      optimize: async () => { try { return await invoke('memory:optimize') } catch { return { freed: 0 } } }
+    },
+
     storage: {
       stats: async () => { try { return await invoke('storage:stats') } catch { return { total: 0 } } },
       clean: async () => { try { return await invoke('storage:clean') } catch { return 0 } },

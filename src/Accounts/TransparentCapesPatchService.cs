@@ -44,6 +44,89 @@ namespace AuroraLauncher
             catch { }
         }
 
+        private static JsonObject ThirdPartyEntry(string authServer)
+        {
+            var host = "";
+            try { host = new Uri(authServer).Host.ToLowerInvariant(); } catch { }
+            if (host.Contains("littleskin.cn"))
+            {
+                return new JsonObject
+                {
+                    ["name"] = "LittleSkin",
+                    ["type"] = "CustomSkinAPI",
+                    ["apiRoot"] = authServer.TrimEnd('/') + "/",
+                    ["sessionRoot"] = authServer.TrimEnd('/') + "/",
+                    ["root"] = "https://littleskin.cn/csl/"
+                };
+            }
+            return new JsonObject
+            {
+                ["name"] = "ThirdParty",
+                ["type"] = "MojangAPI",
+                ["apiRoot"] = authServer.TrimEnd('/') + "/",
+                ["sessionRoot"] = authServer.TrimEnd('/') + "/"
+            };
+        }
+
+        private static string NormalizeAuthServer(string raw)
+        {
+            var authServer = (raw ?? "").Trim().TrimEnd('/');
+            if (authServer.Contains("littleskin.cn", StringComparison.OrdinalIgnoreCase)
+                && !authServer.Contains("/api/yggdrasil", StringComparison.OrdinalIgnoreCase))
+                authServer += "/api/yggdrasil";
+            return authServer;
+        }
+
+        /// <summary>
+        /// 启动前把已有（可能来自 PCL/HMCL 或旧账户）的 CustomSkinLoader 配置对齐当前账户。
+        /// 微软账户只保留 Mojang 官方源，避免继续从 LittleSkin 等第三方源取皮肤。
+        /// </summary>
+        public static void AlignSource(string gameDir, JsonObject account)
+        {
+            try
+            {
+                var type = account["type"]?.GetValue<string>() ?? "";
+                if (type != "microsoft" && type != "authlib") return;
+                var dir = Path.Combine(gameDir, "CustomSkinLoader");
+                var file = Path.Combine(dir, "CustomSkinLoader.json");
+                var config = File.Exists(file) ? JsonNode.Parse(File.ReadAllText(file)) as JsonObject : null;
+
+                if (type == "microsoft")
+                {
+                    if (config == null) return;
+                    config["loadlist"] = new JsonArray { new JsonObject { ["name"] = "Mojang", ["type"] = "MojangAPI" } };
+                }
+                else
+                {
+                    var authServer = NormalizeAuthServer(account["authServer"]?.GetValue<string>() ?? "");
+                    if (string.IsNullOrWhiteSpace(authServer)) return;
+                    var host = "";
+                    try { host = new Uri(authServer).Host; } catch { }
+                    var list = config?["loadlist"] as JsonArray;
+                    var already = list?.OfType<JsonObject>().Any(item =>
+                        (item["apiRoot"]?.GetValue<string>() ?? "").Contains(host, StringComparison.OrdinalIgnoreCase)
+                        || (item["root"]?.GetValue<string>() ?? "").Contains(host, StringComparison.OrdinalIgnoreCase)) == true;
+                    if (already) return;
+                    if (config == null)
+                    {
+                        Directory.CreateDirectory(dir);
+                        config = new JsonObject { ["version"] = "15.1", ["buildNumber"] = 0 };
+                    }
+                    config["loadlist"] = new JsonArray { ThirdPartyEntry(authServer) };
+                }
+                config["auroraManaged"] = true;
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(file, config.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                try
+                {
+                    var cache = Path.Combine(dir, "cache");
+                    if (Directory.Exists(cache)) Directory.Delete(cache, true);
+                }
+                catch { }
+            }
+            catch { }
+        }
+
         private static void PrepareLocalFiles(string gameDir, JsonObject account)
         {
             var id = account["id"]?.GetValue<string>() ?? "";
@@ -92,13 +175,7 @@ namespace AuroraLauncher
             }
             if (type == "authlib" && !string.IsNullOrWhiteSpace(authServer))
             {
-                list.Add(new JsonObject
-                {
-                    ["name"] = "LittleSkin",
-                    ["type"] = "MojangAPI",
-                    ["apiRoot"] = authServer + "/",
-                    ["sessionRoot"] = authServer + "/"
-                });
+                list.Add(ThirdPartyEntry(authServer));
             }
             else
             {

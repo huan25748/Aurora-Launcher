@@ -356,7 +356,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "2.0.1.1",
+                    ["${launcher_version}"] = "2.1.0",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -388,7 +388,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.0.0");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.1.0");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
@@ -402,6 +402,28 @@ namespace AuroraLauncher
                     args.Add("-cp");
                     args.Add(classpath);
                 }
+                try
+                {
+                    var skinMods = Path.Combine(gameDir, "mods");
+                    var hasSkinPatch = Directory.Exists(skinMods)
+                        && Directory.GetFiles(skinMods, "*.jar").Any(file => Path.GetFileName(file).Contains("customskinloader", StringComparison.OrdinalIgnoreCase));
+                    if (hasSkinPatch)
+                    {
+                        var skinConfig = Path.Combine(gameDir, "CustomSkinLoader", "CustomSkinLoader.json");
+                        var managed = true;
+                        if (File.Exists(skinConfig))
+                        {
+                            try
+                            {
+                                managed = JsonNode.Parse(File.ReadAllText(skinConfig))?["auroraManaged"]?.GetValue<bool>() == true;
+                            }
+                            catch { managed = false; }
+                        }
+                        if (managed) await TransparentCapesPatchService.Ensure(instance, versionId, account);
+                        else TransparentCapesPatchService.AlignSource(gameDir, account);
+                    }
+                }
+                catch { }
                 var loaderKind = instance["loader"]?.GetValue<string>() ?? "";
                 if (loaderKind == "fabric" || loaderKind == "quilt")
                 {
@@ -414,7 +436,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=2.0.0");
+                args.Add("-Dminecraft.launcher.version=2.1.0");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
