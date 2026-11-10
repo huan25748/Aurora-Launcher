@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
@@ -129,11 +130,47 @@ namespace AuroraLauncher
                     catch { }
                 };
                 core.Navigate("https://aurora.local/index.html");
+                FileDropTarget.Attach(this, path => _ = ImportDroppedPackAsync(path), active => GameEvents.Emit("drag-state", new JsonObject { ["active"] = active }));
+                core.NavigationCompleted += (_, _) => FileDropTarget.Attach(this, path => _ = ImportDroppedPackAsync(path), active => GameEvents.Emit("drag-state", new JsonObject { ["active"] = active }));
+                var dropRetry = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                dropRetry.Tick += (_, _) => { dropRetry.Stop(); FileDropTarget.Attach(this, path => _ = ImportDroppedPackAsync(path), active => GameEvents.Emit("drag-state", new JsonObject { ["active"] = active })); };
+                dropRetry.Start();
+
+                var packArg = Environment.GetCommandLineArgs().Skip(1).FirstOrDefault(arg => IsPackFile(arg));
+                if (packArg != null) _ = ImportDroppedPackAsync(packArg);
             }
             catch (Exception ex)
             {
                 MessageBox.Show(this, "WebView2 初始化失败：\n" + ex.Message, "Aurora Launcher", MessageBoxButton.OK, MessageBoxImage.Error);
                 Close();
+            }
+        }
+
+        private static bool IsPackFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            return ext is ".zip" or ".mrpack" or ".curseforge" or ".modpack";
+        }
+
+        private async Task ImportDroppedPackAsync(string file)
+        {
+            try
+            {
+                var name = Path.GetFileName(file);
+                var imported = await InstanceArchiveService.ImportFromPath(file);
+                BridgeService.NotifyInstances();
+                if (imported != null)
+                {
+                    var instanceName = imported["name"]?.GetValue<string>() ?? name;
+                    GameEvents.Emit("instances", BridgeService.ListInstances());
+                    GameEvents.Emit("toast", new JsonObject { ["type"] = "success", ["message"] = "整合包已安装：" + instanceName, ["title"] = "导入完成" });
+                }
+            }
+            catch (Exception ex)
+            {
+                ProgressService.Fail(ex.Message);
+                MessageBox.Show(this, "导入整合包失败：\n" + ex.Message, "Aurora Launcher", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 

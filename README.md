@@ -2,7 +2,7 @@
 
 Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
 
-本文档以 **2.0.0** 为基线，介绍启动器当前已经具备的功能。
+本文档以 **2.1.0** 为基线，介绍启动器当前已经具备的功能。
 
 项目前身是 Electron 版 Aurora Launcher 1.0.78；本仓库是使用 **.NET 6 + WPF + WebView2** 重写的当前版本。
 
@@ -134,7 +134,9 @@ vanilla
 - 下载源设置对下载候选与版本列表生效；Modrinth 支持自动、官方、镜像，分类下载源可按原版 / Forge / NeoForge / Fabric / Quilt 单独指定。
 - Fabric API 版本列表由 Modrinth 查询并按实例 MC 版本精确过滤，下载优先 CurseForge，失败回退 Modrinth。
 - 支持本地 `.mrpack` 导入。
-- 支持整合包安装与实例创建。
+- 支持整合包安装与实例创建：把 .zip / .mrpack / .curseforge 整合包直接拖进窗口任意位置即可安装，拖入时窗口变暗并提示「松开安装整合包」，松开后自动识别格式并导入。
+- 也支持把整合包拖到 exe / 快捷方式上，或通过「打开方式」选择启动器，用启动参数导入。
+- 拖放由注册在 WebView2 子窗口上的 OLE 接收器处理，不受 WebView2 遮挡影响。
 
 ### 内容管理
 

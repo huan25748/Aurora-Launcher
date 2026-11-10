@@ -16,6 +16,6 @@
         <shell:WindowChrome CaptionHeight="0" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" />
     </shell:WindowChrome.WindowChrome>
     <Grid>
-        <wv2:WebView2 x:Name="Browser" DefaultBackgroundColor="#15171a" />
+        <wv2:WebView2 x:Name="Browser" DefaultBackgroundColor="#15171a" AllowExternalDrop="False" />
     </Grid>
 </Window>
