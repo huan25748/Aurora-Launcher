@@ -9,13 +9,15 @@ namespace AuroraLauncher
 {
     internal static class McmodService
     {
-        private static readonly HttpClient Http = CreateHttp();
+        private static HttpClient Http => HttpFactory.For("https://www.mcmod.cn/");
         private static readonly ConcurrentDictionary<string, (DateTime At, string Url)> Cache = new();
 
         private static HttpClient CreateHttp()
         {
-            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 AuroraLauncher");
+            var handler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(8) };
+            HttpFactory.Configure(handler);
+            var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
             return client;
         }
 

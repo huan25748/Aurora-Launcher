@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Xml.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,9 +34,13 @@ namespace AuroraLauncher
             }
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonArray> ListCache = new();
+
         public static async Task<JsonArray> List(string kind, string mcVersion, CancellationToken token = default)
         {
             if (string.IsNullOrWhiteSpace(mcVersion)) return new JsonArray();
+            var cacheKey = kind + ":" + mcVersion;
+            ListCache.TryGetValue(cacheKey, out var cachedList);
             var versions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (kind == "forge")
             {
@@ -51,7 +56,9 @@ namespace AuroraLauncher
                 {
                     try
                     {
-                        var json = JsonNode.Parse(await DownloadService.GetText($"https://bmclapi2.bangbang93.com/forge/minecraft/{Uri.EscapeDataString(key)}", token)) as JsonArray;
+                        using var mirrorTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        mirrorTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                        var json = JsonNode.Parse(await DownloadService.GetText($"https://bmclapi2.bangbang93.com/forge/minecraft/{Uri.EscapeDataString(key)}", mirrorTimeout.Token)) as JsonArray;
                         if (json == null) continue;
                         foreach (var item in json)
                         {
@@ -81,7 +88,9 @@ namespace AuroraLauncher
                 // Fallback: official maven metadata has no per-version time.
                 try
                 {
-                    var xml = await DownloadService.GetTextOfficial("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", token);
+                    using var officialTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    officialTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                    var xml = await DownloadService.GetTextOfficial("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", officialTimeout.Token);
                     foreach (Match match in Regex.Matches(xml, "<version>([^<]+)</version>"))
                     {
                         var value = match.Groups[1].Value;
@@ -99,11 +108,15 @@ namespace AuroraLauncher
                 JsonObject? detail;
                 try
                 {
-                    detail = JsonNode.Parse(await DownloadService.GetText($"https://maven.neoforged.net/api/maven/details/releases/net/neoforged/{package}", token)) as JsonObject;
+                    using var officialTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    officialTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                    detail = JsonNode.Parse(await DownloadService.GetText($"https://maven.neoforged.net/api/maven/details/releases/net/neoforged/{package}", officialTimeout.Token)) as JsonObject;
                 }
                 catch
                 {
-                    detail = JsonNode.Parse(await DownloadService.GetText($"https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/{package}", token)) as JsonObject;
+                    using var mirrorTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    mirrorTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                    detail = JsonNode.Parse(await DownloadService.GetText($"https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/{package}", mirrorTimeout.Token)) as JsonObject;
                 }
                 if (detail?["files"] is JsonArray files)
                 {
@@ -126,7 +139,7 @@ namespace AuroraLauncher
                     }
                 }
             }
-            return new JsonArray(versions
+            var result = new JsonArray(versions
                 .OrderByDescending(v => v, StringComparer.OrdinalIgnoreCase)
                 .Select(v => (JsonNode)new JsonObject
                 {
@@ -135,6 +148,9 @@ namespace AuroraLauncher
                     ["mcVersion"] = mcVersion
                 })
                 .ToArray());
+            if (result.Count > 0) ListCache[cacheKey] = result;
+            else if (cachedList != null) return cachedList;
+            return result;
         }
 
         public static async Task<JsonObject> Install(string kind, string mcVersion, string? loaderVersion, string? instanceName, bool createInstance, string? optifineVersion = null, CancellationToken token = default)
@@ -193,6 +209,9 @@ namespace AuroraLauncher
             var versions = list.OfType<JsonObject>().Select(item => item["version"]?.GetValue<string>() ?? "").Where(v => v.Length > 0).ToList();
             if (versions.Count == 0) throw new Exception($"没有找到适用于 {mcVersion} 的 {kind} 版本");
             var chosen = (!string.IsNullOrWhiteSpace(loaderVersion) ? versions.FirstOrDefault(v => v == loaderVersion) : null) ?? versions[0];
+            // 新版 Forge 的版本号可能带 "-<mc>" 后缀（如 65.1.6-26.2），maven 坐标只需要 loader 部分。
+            if (chosen.EndsWith("-" + mcVersion, StringComparison.OrdinalIgnoreCase))
+                chosen = chosen[..^(mcVersion.Length + 1)];
             ProgressService.Update(1, "已选择 " + chosen);
 
             if (createInstance && installRoot == null)
@@ -451,6 +470,7 @@ namespace AuroraLauncher
             var librariesDir = Path.Combine(AppPaths.InstallRoot, "libraries");
             var tasks = new List<(string Url, string Path, string? Sha1)>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var processorCoords = new List<string>();
             string? mappingsCoord = null;
 
             void Add(string? name, string? baseUrl, JsonNode? artifact)
@@ -510,6 +530,7 @@ namespace AuroraLauncher
                             foreach (var coord in coords)
                             {
                                 if (string.IsNullOrWhiteSpace(coord)) continue;
+                                processorCoords.Add(coord!);
                                 Add(coord, "https://maven.minecraftforge.net/", null);
                             }
                         }

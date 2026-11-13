@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace AuroraLauncher
@@ -14,27 +15,46 @@ namespace AuroraLauncher
         private const string OfficialManifest = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
         private const string MirrorManifest = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
         private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(1);
-        private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        private static HttpClient Http => HttpFactory.Client;
 
         private static string CacheFile => Path.Combine(AppPaths.SettingsDir, "cache", "version_manifest.json");
         private static string VersionsDir => Path.Combine(AppPaths.RootDir, "versions");
 
         private static async Task<string> FetchManifestText()
         {
+            // 先官方，失败再退回 BMCLAPI 镜像；每个源单独限时，避免一个源卡住拖死启动。
             Exception? last = null;
             foreach (var url in new[] { OfficialManifest, MirrorManifest })
             {
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                    request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
-                    using var response = await Http.SendAsync(request);
-                    if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode}");
-                    return await response.Content.ReadAsStringAsync();
+                    return await FetchOne(url, TimeSpan.FromSeconds(4));
                 }
                 catch (Exception ex) { last = ex; }
             }
             throw last ?? new Exception("无法获取 Minecraft 版本列表");
+        }
+
+        private static async Task<string> FetchOne(string url, TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            using var response = await HttpFactory.For(url).SendAsync(request, cts.Token);
+            if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode}");
+            return await response.Content.ReadAsStringAsync(cts.Token);
+        }
+
+        private static JsonObject? StaleCache()
+        {
+            try
+            {
+                if (!File.Exists(CacheFile)) return null;
+                var cached = JsonNode.Parse(File.ReadAllText(CacheFile)) as JsonObject;
+                if (cached?["data"] is JsonObject data) return (JsonObject)JsonNode.Parse(data.ToJsonString())!;
+            }
+            catch { }
+            return null;
         }
 
         public static async Task<JsonObject> Manifest(bool force)
@@ -54,7 +74,17 @@ namespace AuroraLauncher
                 catch { }
             }
 
-            var text = await FetchManifestText();
+            string text;
+            try
+            {
+                text = await FetchManifestText();
+            }
+            catch
+            {
+                var stale = StaleCache();
+                if (stale != null) return stale;
+                throw;
+            }
             var raw = JsonNode.Parse(text) as JsonObject ?? throw new Exception("版本列表格式不正确");
             var latest = raw["latest"] as JsonObject ?? new JsonObject();
             var versions = new JsonArray();

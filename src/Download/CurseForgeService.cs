@@ -14,7 +14,7 @@ namespace AuroraLauncher
     internal static class CurseForgeService
     {
         private const string Api = "https://mod.mcimirror.top/curseforge/v1";
-        private static readonly HttpClient Http = CreateHttp();
+        private static HttpClient Http => HttpFactory.For(Api);
         private static readonly ConcurrentDictionary<string, (DateTime At, JsonNode Value)> Cache = new();
 
         private static HttpClient CreateHttp()
@@ -25,12 +25,15 @@ namespace AuroraLauncher
                 MaxConnectionsPerServer = 64,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10)
             };
-            return new HttpClient(handler)
+            HttpFactory.Configure(handler);
+            var client = new HttpClient(handler)
             {
                 Timeout = TimeSpan.FromSeconds(25),
                 DefaultRequestVersion = HttpVersion.Version20,
                 DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
             };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            return client;
         }
 
         private static async Task<JsonNode> Get(string path)
@@ -39,7 +42,7 @@ namespace AuroraLauncher
             if (Cache.TryGetValue(url, out var cached) && DateTime.UtcNow - cached.At < TimeSpan.FromMinutes(2))
                 return JsonNode.Parse(cached.Value.ToJsonString())!;
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
             request.Headers.Accept.ParseAdd("application/json");
             using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             var text = await response.Content.ReadAsStringAsync();

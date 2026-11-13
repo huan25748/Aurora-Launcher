@@ -16,7 +16,7 @@ namespace AuroraLauncher
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, server);
-                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
+                request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                 using var response = await Http.SendAsync(request);
                 if (!response.IsSuccessStatusCode) return null;
                 var text = await response.Content.ReadAsStringAsync();
@@ -29,7 +29,7 @@ namespace AuroraLauncher
         {
             if (File.Exists(JarPath)) return JarPath;
             using var request = new HttpRequestMessage(HttpMethod.Get, "https://authlib-injector.yushi.moe/artifact/latest.json");
-            request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
             using var response = await Http.SendAsync(request);
             var text = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode) throw new Exception("authlib-injector 版本获取失败");

@@ -177,7 +177,7 @@ namespace AuroraLauncher
                         await RunDownloads(assets, Concurrency(), token, null, (done, bytes, total, name) =>
                         {
                             if (reportProgress) ProgressService.Progress(done, $"{done}/{assets.Count} · 已下载 {FormatBytes(bytes)} · {name}");
-                        });
+                        }, allowPartial: true);
                         if (reportProgress) ProgressService.Update(assets.Count, "资源已下载");
                     }
                 }
@@ -268,20 +268,23 @@ namespace AuroraLauncher
             await RunDownloads(assets, Concurrency(), token, null, (done, bytes, total, name) =>
             {
                 ProgressService.Progress(done, $"{done}/{assets.Count} · 已下载 {FormatBytes(bytes)} · {name}");
-            });
+            }, allowPartial: true);
             ProgressService.Update(assets.Count, "资源已下载");
         }
 
-        private static async Task RunDownloads(List<(string Url, string Path, string? Sha1, long Size)> files, int concurrency, CancellationToken token, Action<int, string>? progress = null, Action<int, long, long, string>? byteProgress = null)
+        private static async Task RunDownloads(List<(string Url, string Path, string? Sha1, long Size)> files, int concurrency, CancellationToken token, Action<int, string>? progress = null, Action<int, long, long, string>? byteProgress = null, bool allowPartial = false)
         {
+            var totalBytes = files.Sum(file => Math.Max(0, file.Size));
+            string SizeText(long downloaded) => totalBytes > 0
+                ? $"{FormatBytes(Math.Min(downloaded, totalBytes))} / {FormatBytes(totalBytes)}"
+                : $"已下载 {FormatBytes(downloaded)}";
+
             using var gate = new SemaphoreSlim(Math.Max(1, concurrency));
             var done = 0;
-            var totalBytes = files.Sum(file => Math.Max(0, file.Size));
             long downloadedBytes = 0;
-            string SizeText(long downloaded) => totalBytes > 0
-                ? $"{FormatBytes(downloaded)} / {FormatBytes(totalBytes)}"
-                : $"已下载 {FormatBytes(downloaded)}";
-            var tasks = files.Select(async file =>
+            var failed = new System.Collections.Concurrent.ConcurrentBag<(string Url, string Path, string? Sha1, long Size)>();
+
+            await Task.WhenAll(files.Select(async file =>
             {
                 await gate.WaitAsync(token);
                 var ok = false;
@@ -301,6 +304,13 @@ namespace AuroraLauncher
                     });
                     ok = true;
                 }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch
+                {
+                    var valid = false;
+                    try { valid = File.Exists(file.Path) && (file.Size <= 0 || new FileInfo(file.Path).Length == file.Size); } catch { }
+                    if (valid) ok = true; else failed.Add(file);
+                }
                 finally
                 {
                     gate.Release();
@@ -311,8 +321,22 @@ namespace AuroraLauncher
                             $"{finished}/{files.Count} · {SizeText(System.Threading.Interlocked.Read(ref downloadedBytes))} · {Path.GetFileName(file.Path)}");
                     }
                 }
-            });
-            await Task.WhenAll(tasks);
+            }));
+
+            if (failed.Count == 0) return;
+            if (allowPartial)
+            {
+                var names = string.Join("、", failed.Take(5).Select(f => Path.GetFileName(f.Path)));
+                GameEvents.Emit("log", new JsonObject
+                {
+                    ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["source"] = "launcher",
+                    ["level"] = "warning",
+                    ["text"] = $"有 {failed.Count} 个游戏资源未能下载，已跳过（不影响启动）：{names}"
+                });
+                return;
+            }
+            throw new Exception($"{failed.Count} 个文件下载失败，请重新启动安装续传");
         }
 
         private static bool RulesAllow(JsonArray? rules)

@@ -2,7 +2,7 @@
 
 Aurora Launcher 是一个面向 Windows 的 Minecraft 启动器。
 
-本文档以 **2.1.0** 为基线，介绍启动器当前已经具备的功能。
+本文档以 **2.1.1** 为基线，介绍启动器当前已经具备的功能。
 
 项目前身是 Electron 版 Aurora Launcher 1.0.78；本仓库是使用 **.NET 6 + WPF + WebView2** 重写的当前版本。
 

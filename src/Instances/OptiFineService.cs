@@ -97,7 +97,7 @@ namespace AuroraLauncher
         private static async Task DownloadDirect(string url, string target, CancellationToken token, Action<long, long>? onProgress)
         {
             using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(120) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
             using var response = await client.GetAsync(url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, token);
             response.EnsureSuccessStatusCode();
             var total = response.Content.Headers.ContentLength ?? 0;

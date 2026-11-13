@@ -48,7 +48,7 @@ namespace AuroraLauncher
                 var latest = await latestTask;
                 if (latest != null) result.Add(latest);
                 using var request = new HttpRequestMessage(HttpMethod.Get, "https://launchercontent.mojang.com/v2/news.json");
-                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0");
+                request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                 using var response = await Http.SendAsync(request);
                 var json = JsonNode.Parse(await response.Content.ReadAsStringAsync()) as JsonObject;
                 if (json?["entries"] is JsonArray entries)

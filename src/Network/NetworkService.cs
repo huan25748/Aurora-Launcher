@@ -10,7 +10,7 @@ namespace AuroraLauncher
 {
     internal static class NetworkService
     {
-        private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        private static HttpClient Http => HttpFactory.Client;
 
         public static async Task<JsonArray> Test()
         {
@@ -43,10 +43,10 @@ namespace AuroraLauncher
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+                request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                 request.Headers.Accept.ParseAdd("application/json");
                 if (range) request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
-                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                using var response = await HttpFactory.For(url).SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 watch.Stop();
                 var ok = response.IsSuccessStatusCode && (!range || (int)response.StatusCode == 206);
                 return new JsonObject

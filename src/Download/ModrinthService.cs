@@ -15,7 +15,7 @@ namespace AuroraLauncher
 {
     internal static class ModrinthService
     {
-        private static readonly HttpClient Http = CreateHttp();
+        private static HttpClient Http => HttpFactory.For(BaseUrl());
         private static readonly ConcurrentDictionary<string, (DateTime At, JsonNode Value)> Cache = new();
 
         private static HttpClient CreateHttp()
@@ -26,12 +26,15 @@ namespace AuroraLauncher
                 MaxConnectionsPerServer = 64,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10)
             };
-            return new HttpClient(handler)
+            HttpFactory.Configure(handler);
+            var client = new HttpClient(handler)
             {
                 Timeout = TimeSpan.FromSeconds(120),
                 DefaultRequestVersion = HttpVersion.Version20,
                 DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
             };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            return client;
         }
 
         private static string BaseUrl()

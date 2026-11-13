@@ -17,9 +17,9 @@ namespace AuroraLauncher
         private const int MaxSegmentsPerFile = 12;
         private const int MaxFileConnections = 12;
         private const long AdaptiveSegmentTarget = 8L * 1024 * 1024;
-        private const long SlowChunkSpeed = 50L * 1024;
+        private const long SlowChunkSpeed = 80L * 1024;
         private const long MinSplitRemaining = 2L * 1024 * 1024;
-        private const int SlowChunkSeconds = 8;
+        private const int SlowChunkSeconds = 4;
         private static readonly SemaphoreSlim GlobalConnectionGate = new(64, 64);
         private const int SegmentChunkSize = 512 * 1024;
         private static long ChunkSizeFor(long total, bool aggressive)
@@ -36,15 +36,55 @@ namespace AuroraLauncher
         private static readonly SemaphoreSlim SegmentGate = new(128);
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> FileGates = new(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly HttpClient Http = new HttpClient(new SocketsHttpHandler
+        private static readonly HttpClient Http = CreateHttp();
+
+        private static HttpClient CreateHttp()
         {
-            MaxConnectionsPerServer = 128,
-            EnableMultipleHttp2Connections = true,
-            ConnectTimeout = TimeSpan.FromSeconds(10),
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
-        })
-        { Timeout = TimeSpan.FromMinutes(10), DefaultRequestVersion = System.Net.HttpVersion.Version20, DefaultVersionPolicy = System.Net.Http.HttpVersionPolicy.RequestVersionOrLower };
+            var handler = new SocketsHttpHandler
+            {
+                MaxConnectionsPerServer = 128,
+                EnableMultipleHttp2Connections = true,
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+            };
+            HttpFactory.Configure(handler);
+            var client = new HttpClient(handler)
+            {
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+                DefaultRequestVersion = System.Net.HttpVersion.Version20,
+                DefaultVersionPolicy = System.Net.Http.HttpVersionPolicy.RequestVersionOrLower
+            };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            return client;
+        }
+
+        private static readonly HttpClient DirectHttp = CreateDirect();
+
+        private static HttpClient CreateDirect()
+        {
+            var handler = new SocketsHttpHandler
+            {
+                MaxConnectionsPerServer = 128,
+                EnableMultipleHttp2Connections = true,
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                UseProxy = false,
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+            };
+            HttpFactory.ForceIPv4(handler);
+            var client = new HttpClient(handler)
+            {
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+                DefaultRequestVersion = System.Net.HttpVersion.Version20,
+                DefaultVersionPolicy = System.Net.Http.HttpVersionPolicy.RequestVersionOrLower
+            };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            return client;
+        }
+
+        private static HttpClient Pick(HttpRequestMessage request) =>
+            HttpFactory.IsDomestic(request.RequestUri?.ToString() ?? "") ? DirectHttp : Http;
 
         public static string Mirror(string url)
         {
@@ -114,15 +154,16 @@ namespace AuroraLauncher
                 || url.StartsWith("https://piston-data.mojang.com/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://launchermeta.mojang.com/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://launcher.mojang.com/", StringComparison.OrdinalIgnoreCase)
-                || url.StartsWith("https://libraries.minecraft.net/", StringComparison.OrdinalIgnoreCase)
-                || url.StartsWith("https://resources.download.minecraft.net/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.minecraftforge.net/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://files.minecraftforge.net/maven/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.neoforged.net/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.fabricmc.net/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://maven.quiltmc.org/", StringComparison.OrdinalIgnoreCase)
                 || url.StartsWith("https://cdn.modrinth.com/", StringComparison.OrdinalIgnoreCase)
-                || url.StartsWith("https://api.modrinth.com/", StringComparison.OrdinalIgnoreCase);
+                || url.StartsWith("https://api.modrinth.com/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://edge.forgecdn.net/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://mediafilez.forgecdn.net/", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://media.forgecdn.net/", StringComparison.OrdinalIgnoreCase);
         }
 
         // Modrinth / CurseForge CDN files use their own segmented single-source
@@ -138,7 +179,6 @@ namespace AuroraLauncher
         // Same ordering as the old launcher's candidates().
         private static string[] Candidates(string url)
         {
-            if (IsContentCdn(url)) return new[] { url };
             var mirror = Mirror(url);
             var list = new List<string>();
             var source = SourceModeFor(url);
@@ -173,9 +213,9 @@ namespace AuroraLauncher
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                         timeout.CancelAfter(TimeSpan.FromSeconds(8));
                         using var request = new HttpRequestMessage(HttpMethod.Get, candidate);
-                        request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+                        request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                         request.Headers.Accept.ParseAdd("application/json");
-                        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                        using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
                         if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode} {candidate}");
                         return await response.Content.ReadAsStringAsync(timeout.Token);
                     }
@@ -194,8 +234,8 @@ namespace AuroraLauncher
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(25));
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
+            using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode} {url}");
             return await response.Content.ReadAsStringAsync(token);
         }
@@ -238,6 +278,36 @@ namespace AuroraLauncher
                 }
             }
             var candidates = Candidates(url);
+            // 小文件（资源对象、配置、图标等）直接单连接下载：
+            // 不做多源探测、不做分段，否则 5000+ 个小文件会被探测和 8 段请求拖死。
+            if (size > 0 && size <= 1_500_000)
+            {
+                Exception? smallLast = null;
+                foreach (var candidate in candidates)
+                {
+                    var smallTemp = destination + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
+                    try
+                    {
+                        using var smallTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        smallTimeout.CancelAfter(TimeSpan.FromSeconds(12));
+                        await DownloadOnce(candidate, smallTemp, size, smallTimeout.Token, onProgress, false);
+                        if (!string.IsNullOrEmpty(sha1) && !CheckSha1(smallTemp, sha1))
+                            throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
+                        if (size > 0 && new FileInfo(smallTemp).Length != size)
+                            throw new Exception("文件大小不匹配：" + Path.GetFileName(destination));
+                        MoveIntoPlace(smallTemp, destination);
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        smallLast = ex is OperationCanceledException && !token.IsCancellationRequested
+                            ? new SlowSourceException("下载源超时，已换源重试")
+                            : ex;
+                        try { if (File.Exists(smallTemp)) File.Delete(smallTemp); } catch { }
+                    }
+                }
+                if (smallLast != null) throw smallLast;
+            }
             var contentCdn = IsContentCdn(url);
             var minMultipart = contentCdn ? MultipartMinSize : 4_000_000;
             Exception? last = null;
@@ -324,7 +394,9 @@ namespace AuroraLauncher
                     }
                     catch (Exception ex)
                     {
-                        last = ex;
+                        last = ex is OperationCanceledException && !token.IsCancellationRequested
+                            ? new SlowSourceException("下载源超时，已换源重试")
+                            : ex;
                         try { if (File.Exists(temp)) File.Delete(temp); } catch { }
                     }
                 }
@@ -345,16 +417,15 @@ namespace AuroraLauncher
             using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             headerTimeout.CancelAfter(TimeSpan.FromSeconds(30));
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
             request.Headers.AcceptEncoding.ParseAdd("identity");
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headerTimeout.Token);
+            using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headerTimeout.Token);
             if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode} {url}");
             var contentLength = response.Content.Headers.ContentLength ?? 0;
             var total = size > 0 ? size : contentLength;
             long received = 0;
-            var started = DateTime.UtcNow;
             var lastEmit = DateTime.UtcNow;
-            await using (var input = await response.Content.ReadAsStreamAsync(token))
+            await using (var input = await response.Content.ReadAsStreamAsync(headerTimeout.Token))
             await using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
             {
                 var buffer = new byte[81920];
@@ -366,17 +437,7 @@ namespace AuroraLauncher
                     if (read <= 0) break;
                     await output.WriteAsync(buffer.AsMemory(0, read), CancellationToken.None);
                     received += read;
-                    if (!allowSlow && total > 1_500_000)
-                    {
-                        var elapsed = (DateTime.UtcNow - started).TotalSeconds;
-                        // 单连接慢于 25 KB/s 就判定这个源不可用，交给外层换源；
-                        // 最后一次尝试不再打断，保证仍能下载完成。
-                        if (elapsed > 8 && received < elapsed * 50_000)
-                            throw new SlowSourceException($"下载源过慢（{received / 1024} KB / {elapsed:0} 秒）");
-                        if (elapsed > Math.Max(45, total / 50_000.0))
-                            throw new SlowSourceException($"下载源超时（{received / 1024} KB / {elapsed:0} 秒）");
-                    }
-                    if ((DateTime.UtcNow - lastEmit).TotalMilliseconds > 120)
+                    if ((DateTime.UtcNow - lastEmit).TotalMilliseconds > 150)
                     {
                         lastEmit = DateTime.UtcNow;
                         onProgress?.Invoke(received, total > 0 ? total : received);
@@ -395,9 +456,9 @@ namespace AuroraLauncher
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(20));
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+                request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                 request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
-                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
                 if (response.StatusCode != System.Net.HttpStatusCode.PartialContent) return 0;
                 var range = response.Content.Headers.ContentRange;
                 return range?.Length ?? 0;
@@ -406,6 +467,43 @@ namespace AuroraLauncher
         }
 
         private static readonly ConcurrentDictionary<string, DateTime> DeadSources = new();
+        private static readonly ConcurrentDictionary<string, (double Kbps, DateTime At)> SpeedCache = new();
+
+        /// <summary>小样本测速（128 KB），用于把带宽更多地分给快的源；同主机缓存 10 分钟。</summary>
+        private static async Task<double> SourceSpeedKbps(string url, CancellationToken token)
+        {
+            string host;
+            try { host = new Uri(url).Host; } catch { return 1; }
+            if (SpeedCache.TryGetValue(host, out var cached) && DateTime.UtcNow - cached.At < TimeSpan.FromMinutes(10))
+                return cached.Kbps;
+            var kbps = 1.0;
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                cts.CancelAfter(TimeSpan.FromSeconds(4));
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
+                request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 131071);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                if ((int)response.StatusCode == 206)
+                {
+                    await using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+                    var buffer = new byte[65536];
+                    long total = 0;
+                    int read;
+                    while (total < 131072 && (read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, 131072 - total)), cts.Token)) > 0)
+                        total += read;
+                    sw.Stop();
+                    if (total > 0 && sw.Elapsed.TotalSeconds > 0.01)
+                        kbps = Math.Max(1, total / 1024.0 / sw.Elapsed.TotalSeconds);
+                }
+                else if (!response.IsSuccessStatusCode) kbps = 0.5;
+            }
+            catch { kbps = 0.5; }
+            SpeedCache[host] = (kbps, DateTime.UtcNow);
+            return kbps;
+        }
         private static readonly ConcurrentDictionary<string, DateTime> SlowHosts = new();
         private static readonly ConcurrentDictionary<string, bool> RangeSupport = new(StringComparer.OrdinalIgnoreCase);
 
@@ -472,9 +570,28 @@ namespace AuroraLauncher
                 count = Math.Max(count, Math.Min(MaxFileConnections, urls.Length * 4));
             var size = (long)Math.Ceiling(total / (double)count);
             var queue = new ConcurrentQueue<RangeChunk>();
+            var sourceWeights = new List<int>();
+            if (urls.Length > 1)
+            {
+                // 先测速，再按速度排序，并按速度分配分段权重；
+                // 避免慢源固定分到 1/N 的段，把整体速度拖住。
+                var speeds = new double[urls.Length];
+                for (var i = 0; i < urls.Length; i++) speeds[i] = await SourceSpeedKbps(urls[i], token);
+                var order = Enumerable.Range(0, urls.Length).OrderByDescending(i => speeds[i]).ToArray();
+                urls = order.Select(i => urls[i]).ToArray();
+                for (var i = 0; i < urls.Length; i++)
+                {
+                    var weight = Math.Clamp((int)Math.Round(speeds[order[i]] / 200.0), 1, 8);
+                    for (var w = 0; w < weight; w++) sourceWeights.Add(i);
+                }
+            }
             var index = 0;
             for (long start = 0; start < total; start += size)
-                queue.Enqueue(new RangeChunk { Start = start, End = Math.Min(total, start + size) - 1, Source = index++ % urls.Length });
+            {
+                var source = urls.Length == 1 ? 0 : sourceWeights[index % sourceWeights.Count];
+                index++;
+                queue.Enqueue(new RangeChunk { Start = start, End = Math.Min(total, start + size) - 1, Source = source });
+            }
 
             long received = 0;
             long lastReport = Environment.TickCount64;
@@ -535,13 +652,13 @@ namespace AuroraLauncher
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                         timeout.CancelAfter(TimeSpan.FromSeconds(30));
                         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                        request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+                        request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
                         request.Headers.AcceptEncoding.ParseAdd("identity");
                         request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(position, chunk.End);
-                        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                        using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
                         if (response.StatusCode != System.Net.HttpStatusCode.PartialContent)
                             throw new RangeUnsupportedException();
-                        await using var input = await response.Content.ReadAsStreamAsync(token);
+                        await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
                         var buffer = new byte[81920];
                         while (position <= chunk.End)
                         {
@@ -561,8 +678,8 @@ namespace AuroraLauncher
                                 if (remaining >= MinSplitRemaining)
                                 {
                                     var half = remaining / 2;
-                                    queue.Enqueue(new RangeChunk { Start = position, End = position + half - 1, Source = (chunk.Source + 1) % urls.Length });
-                                    queue.Enqueue(new RangeChunk { Start = position + half, End = chunk.End, Source = (chunk.Source + 2) % urls.Length });
+                                    queue.Enqueue(new RangeChunk { Start = position, End = position + half - 1, Source = 0 });
+                                    queue.Enqueue(new RangeChunk { Start = position + half, End = chunk.End, Source = 0 });
                                     return;
                                 }
                             }
@@ -597,10 +714,10 @@ namespace AuroraLauncher
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(300));
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd("AuroraLauncher/1.1.0 (.NET)");
+            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
             request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, end);
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (response.StatusCode != System.Net.HttpStatusCode.PartialContent)
                 throw new HttpRequestException($"HTTP {(int)response.StatusCode} 不支持分段下载");
             long received = 0;
