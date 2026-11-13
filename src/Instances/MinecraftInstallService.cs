@@ -17,7 +17,7 @@ namespace AuroraLauncher
 
         internal static int Concurrency()
         {
-            try { return Math.Clamp(BridgeService.GetSettings()["maxConcurrency"]?.GetValue<int>() ?? 32, 1, 64); }
+            try { return Math.Clamp(BridgeService.GetSettings()["maxConcurrency"]?.GetValue<int>() ?? 16, 1, 64); }
             catch { return 32; }
         }
 
@@ -322,6 +322,43 @@ namespace AuroraLauncher
                     }
                 }
             }));
+
+            if (failed.Count == 0) return;
+
+            // 第一次失败通常不是文件本身坏了，而是同一时间并发连接太多被 CDN 重置。
+            // 这里只再试一次，并用较低的并发，等同于“重新点一次安装”，但不用用户手动操作。
+            var retryFiles = failed.ToList();
+            failed = new System.Collections.Concurrent.ConcurrentBag<(string Url, string Path, string? Sha1, long Size)>();
+            progress?.Invoke(done, $"重试剩余 {retryFiles.Count} 个文件");
+            using (var retryGate = new SemaphoreSlim(Math.Min(4, Math.Max(1, concurrency))))
+            {
+                await Task.WhenAll(retryFiles.Select(async file =>
+                {
+                    await retryGate.WaitAsync(token);
+                    var ok = false;
+                    try
+                    {
+                        await DownloadService.Download(file.Url, file.Path, file.Sha1, file.Size, token);
+                        ok = true;
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                    catch
+                    {
+                        var valid = false;
+                        try { valid = File.Exists(file.Path) && (file.Size <= 0 || new FileInfo(file.Path).Length == file.Size); } catch { }
+                        if (valid) ok = true; else failed.Add(file);
+                    }
+                    finally
+                    {
+                        retryGate.Release();
+                        if (ok)
+                        {
+                            var finished = System.Threading.Interlocked.Increment(ref done);
+                            progress?.Invoke(finished, $"{finished}/{files.Count} · {Path.GetFileName(file.Path)}");
+                        }
+                    }
+                }));
+            }
 
             if (failed.Count == 0) return;
             if (allowPartial)

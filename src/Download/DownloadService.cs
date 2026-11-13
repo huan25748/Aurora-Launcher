@@ -97,13 +97,13 @@ namespace AuroraLauncher
                 .Replace("https://launcher.mojang.com/", "https://bmclapi2.bangbang93.com/")
                 .Replace("https://resources.download.minecraft.net/", "https://bmclapi2.bangbang93.com/assets/")
                 .Replace("https://libraries.minecraft.net/", "https://bmclapi2.bangbang93.com/libraries/")
-                .Replace("https://maven.minecraftforge.net/", "https://bmclapi2.bangbang93.com/maven/")
-                .Replace("https://files.minecraftforge.net/maven/", "https://bmclapi2.bangbang93.com/maven/")
-                .Replace("https://maven.neoforged.net/releases/", "https://bmclapi2.bangbang93.com/maven/")
+                .Replace("https://maven.minecraftforge.net/", "https://mirror.nju.edu.cn/bmclapi/")
+                .Replace("https://files.minecraftforge.net/maven/", "https://mirror.nju.edu.cn/bmclapi/")
+                .Replace("https://maven.neoforged.net/releases/", "https://mirror.nju.edu.cn/bmclapi/")
                 .Replace("https://maven.neoforged.net/api/", "https://bmclapi2.bangbang93.com/neoforge/meta/api/")
-                .Replace("https://maven.fabricmc.net/", "https://bmclapi2.bangbang93.com/maven/")
-                .Replace("https://maven.quiltmc.org/repository/release/", "https://bmclapi2.bangbang93.com/maven/")
-                .Replace("https://maven.quiltmc.org/", "https://bmclapi2.bangbang93.com/maven/")
+                .Replace("https://maven.fabricmc.net/", "https://mirror.nju.edu.cn/bmclapi/")
+                .Replace("https://maven.quiltmc.org/repository/release/", "https://mirror.nju.edu.cn/bmclapi/")
+                .Replace("https://maven.quiltmc.org/", "https://mirror.nju.edu.cn/bmclapi/")
                 .Replace("https://meta.fabricmc.net/", "https://bmclapi2.bangbang93.com/fabric-meta/")
                 .Replace("https://meta.quiltmc.org/", "https://bmclapi2.bangbang93.com/quilt-meta/")
                 .Replace("https://api.modrinth.com/", "https://mod.mcimirror.top/modrinth/")
@@ -437,6 +437,7 @@ namespace AuroraLauncher
                     if (read <= 0) break;
                     await output.WriteAsync(buffer.AsMemory(0, read), CancellationToken.None);
                     received += read;
+                    if (total > 0 && received >= total) break;
                     if ((DateTime.UtcNow - lastEmit).TotalMilliseconds > 150)
                     {
                         lastEmit = DateTime.UtcNow;

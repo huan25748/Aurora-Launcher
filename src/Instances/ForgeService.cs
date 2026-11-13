@@ -131,9 +131,12 @@ namespace AuroraLauncher
                         }
                         else
                         {
+                            // NeoForge 的版本号是「去掉 1. 的 MC 版本」：
+                            // 1.21 -> 21.0.x，1.21.1 -> 21.1.x，26.3 -> 26.3.x。
                             var match = Regex.Match(mcVersion, "^1\\.(\\d+)(?:\\.(\\d+))?");
-                            if (!match.Success) continue;
-                            var prefix = $"{match.Groups[1].Value}.{match.Groups[2].Value}.";
+                            var prefix = match.Success
+                                ? $"{match.Groups[1].Value}.{(match.Groups[2].Success ? match.Groups[2].Value : "0")}."
+                                : mcVersion + ".";
                             if (name!.StartsWith(prefix)) versions.Add(name);
                         }
                     }
