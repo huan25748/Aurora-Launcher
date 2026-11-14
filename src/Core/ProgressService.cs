@@ -14,6 +14,46 @@ namespace AuroraLauncher
         private static readonly AsyncLocal<string?> CurrentGroup = new();
         private static readonly AsyncLocal<string?> CurrentStep = new();
         private static readonly AsyncLocal<bool> PackScope = new();
+        private static readonly Dictionary<string, CancellationTokenSource> GroupTokens = new();
+
+        public static CancellationToken ActiveToken
+        {
+            get
+            {
+                lock (Gate)
+                {
+                    var group = ActiveGroup();
+                    if (group == null || group["status"]?.GetValue<string>() != "running") return CancellationToken.None;
+                    var id = group["id"]?.GetValue<string>();
+                    return id != null && GroupTokens.TryGetValue(id, out var cts) ? cts.Token : CancellationToken.None;
+                }
+            }
+        }
+
+        public static void Cancel(string? groupId = null)
+        {
+            JsonObject? target = null;
+            lock (Gate)
+            {
+                target = groupId != null
+                    ? Groups.FirstOrDefault(g => g["id"]?.GetValue<string>() == groupId)
+                    : ActiveGroup();
+                if (target == null || target["status"]?.GetValue<string>() != "running") return;
+                var id = target["id"]?.GetValue<string>();
+                if (id != null && GroupTokens.TryGetValue(id, out var cts))
+                {
+                    try { cts.Cancel(); } catch { }
+                    GroupTokens.Remove(id);
+                }
+                target["status"] = "cancelled";
+                target["finishedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (target["steps"] is JsonArray steps)
+                    foreach (var step in steps.OfType<JsonObject>())
+                        if (step["status"]?.GetValue<string>() == "running") step["status"] = "cancelled";
+            }
+            try { ForgeService.StopInstaller(); } catch { }
+            Emit();
+        }
 
         public static bool IsActive
         {
@@ -145,6 +185,7 @@ namespace AuroraLauncher
             {
                 var group = ActiveGroup();
                 if (group == null) return;
+                if (group["status"]?.GetValue<string>() == "cancelled") return;
                 if (group["steps"] is JsonArray steps)
                 {
                     for (var i = 0; i < steps.Count; i++)
@@ -162,9 +203,11 @@ namespace AuroraLauncher
             lock (Gate)
             {
                 var startedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var groupId = "install-" + Guid.NewGuid().ToString("N")[..10];
+                GroupTokens[groupId] = new CancellationTokenSource();
                 var group = new JsonObject
                 {
-                    ["id"] = "install-" + Guid.NewGuid().ToString("N")[..10],
+                    ["id"] = groupId,
                     ["title"] = title,
                     ["steps"] = new JsonArray(),
                     ["status"] = "running",

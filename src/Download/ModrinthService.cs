@@ -45,6 +45,16 @@ namespace AuroraLauncher
             return "https://api.modrinth.com/v2";
         }
 
+        private static async Task<string?> Fetch(string target)
+        {
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try { return await Http.GetStringAsync(target); }
+                catch { if (attempt < 2) await Task.Delay(300 * (attempt + 1)); }
+            }
+            return null;
+        }
+
         private static async Task<JsonNode?> GetFast(string path)
         {
             var settings = BridgeService.GetSettings();
@@ -59,7 +69,7 @@ namespace AuroraLauncher
             {
                 try
                 {
-                    var text = await Http.GetStringAsync(bases[0] + path);
+                    var text = await Fetch(bases[0] + path) ?? throw new Exception("request failed");
                     return JsonNode.Parse(text);
                 }
                 catch (Exception ex) { Log("single source failed " + bases[0] + path + " : " + ex.Message); }
@@ -69,7 +79,7 @@ namespace AuroraLauncher
                     : "https://mod.mcimirror.top/modrinth/v2";
                 try
                 {
-                    var text = await Http.GetStringAsync(fallback + path);
+                    var text = await Fetch(fallback + path) ?? throw new Exception("request failed");
                     return JsonNode.Parse(text);
                 }
                 catch { return null; }
@@ -77,7 +87,7 @@ namespace AuroraLauncher
             using var cts = new CancellationTokenSource();
             var tasks = bases.Select(async b =>
             {
-                var text = await Http.GetStringAsync(b + path, cts.Token);
+                var text = await Fetch(b + path) ?? throw new Exception("request failed");
                 return JsonNode.Parse(text);
             }).ToList();
             while (tasks.Count > 0)
@@ -106,7 +116,7 @@ namespace AuroraLauncher
                     : "https://mod.mcimirror.top/modrinth/v2";
                 try
                 {
-                    node = JsonNode.Parse(await Http.GetStringAsync(alternate + path));
+                    node = JsonNode.Parse(await Fetch(alternate + path) ?? throw new Exception("request failed"));
                 }
                 catch { }
             }
@@ -257,6 +267,7 @@ namespace AuroraLauncher
             ProgressService.Update(1, "版本已选择");
             var instance = BridgeService.GetInstance(instanceId) as JsonObject ?? throw new Exception("实例不存在");
             var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", instance["versionId"]?.GetValue<string>() ?? "");
+            var packCache = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "files", projectId);
             var dir = Path.Combine(gameDir, folder);
             Directory.CreateDirectory(dir);
             var fileName = file["filename"]?.GetValue<string>() ?? "download.jar";
@@ -292,6 +303,7 @@ namespace AuroraLauncher
             };
             var instance = BridgeService.GetInstance(instanceId) as JsonObject ?? throw new Exception("实例不存在");
             var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", instance["versionId"]?.GetValue<string>() ?? "");
+            var packCache = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "files", projectId);
             var dir = Path.Combine(gameDir, folder);
             Directory.CreateDirectory(dir);
             var fileName = file["filename"]?.GetValue<string>() ?? "download.jar";
@@ -443,6 +455,7 @@ namespace AuroraLauncher
             await InstanceIconService.EnsureRemote(instanceId, instance["gameDir"]?.GetValue<string>() ?? "", projectInfo);
             ProgressService.UpdateAt(baseStep, 1, "安装完成");
             var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", instance["versionId"]?.GetValue<string>() ?? "");
+            var packCache = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "files", projectId);
             if (index["files"] is JsonArray files)
             {
                 var downloadStep = ProgressService.Step("下载整合包文件", files.Count, files.Count + " 个文件");
@@ -464,6 +477,10 @@ namespace AuroraLauncher
                         await gate.WaitAsync();
                         var target = Path.GetFullPath(Path.Combine(gameDir, path));
                         if (!target.StartsWith(Path.GetFullPath(gameDir), StringComparison.OrdinalIgnoreCase)) return;
+                        var cacheFile = Path.Combine(packCache, path.Replace('/', Path.DirectorySeparatorChar));
+                        try { if (File.Exists(cacheFile) && new FileInfo(cacheFile).Length > 0) { Directory.CreateDirectory(Path.GetDirectoryName(target)!); File.Copy(cacheFile, target, true); var cachedDone = System.Threading.Interlocked.Increment(ref doneCount); ProgressService.ProgressAt(downloadStep, packTotal > 0 ? System.Threading.Interlocked.Read(ref packDone) : cachedDone, "缓存：" + Path.GetFileName(target)); return; } } catch { }
+                        var expected = entry["fileSize"]?.GetValue<long>() ?? 0;
+                        try { if (File.Exists(target) && (expected <= 0 || new FileInfo(target).Length == expected)) { var skipped = System.Threading.Interlocked.Increment(ref doneCount); ProgressService.ProgressAt(downloadStep, packTotal > 0 ? System.Threading.Interlocked.Read(ref packDone) : skipped, "已存在：" + Path.GetFileName(target)); return; } } catch { }
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                         Exception? last = null;
                         long lastReceived = 0;
@@ -476,11 +493,13 @@ namespace AuroraLauncher
                                     var delta = Math.Max(0, received - lastReceived);
                                     lastReceived = received;
                                     var aggregate = System.Threading.Interlocked.Add(ref packDone, delta);
+                                    if (packTotal > 0) aggregate = Math.Min(aggregate, packTotal);
                                     var text = Path.GetFileName(path);
                                     if (packTotal > 0)
                                         text += " · " + MinecraftInstallService.FormatBytes(aggregate) + " / " + MinecraftInstallService.FormatBytes(packTotal);
                                     ProgressService.ProgressAt(downloadStep, packTotal > 0 ? aggregate : doneCount, text);
                                 });
+                                try { Directory.CreateDirectory(Path.GetDirectoryName(cacheFile)!); File.Copy(target, cacheFile, true); } catch { }
                                 last = null; break;
                             }
                             catch (Exception ex) { last = ex; }

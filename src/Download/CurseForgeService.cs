@@ -41,16 +41,34 @@ namespace AuroraLauncher
             var url = Api + path;
             if (Cache.TryGetValue(url, out var cached) && DateTime.UtcNow - cached.At < TimeSpan.FromMinutes(2))
                 return JsonNode.Parse(cached.Value.ToJsonString())!;
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
-            request.Headers.Accept.ParseAdd("application/json");
-            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-            var text = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode) throw new Exception($"CurseForge HTTP {(int)response.StatusCode}");
-            var node = JsonNode.Parse(text) ?? new JsonObject();
-            if (Cache.Count > 128) Cache.Clear();
-            Cache[url] = (DateTime.UtcNow, JsonNode.Parse(node.ToJsonString())!);
-            return node;
+            Exception? last = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                    request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
+                    request.Headers.Accept.ParseAdd("application/json");
+                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                    var text = await response.Content.ReadAsStringAsync();
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        last = new Exception($"CurseForge HTTP {(int)response.StatusCode}");
+                        if ((int)response.StatusCode < 500 && (int)response.StatusCode != 429) break;
+                        throw last;
+                    }
+                    var node = JsonNode.Parse(text) ?? new JsonObject();
+                    if (Cache.Count > 128) Cache.Clear();
+                    Cache[url] = (DateTime.UtcNow, JsonNode.Parse(node.ToJsonString())!);
+                    return node;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    if (attempt < 2) await Task.Delay(400 * (attempt + 1));
+                }
+            }
+            throw last ?? new Exception("CurseForge 请求失败");
         }
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, string Json)> SearchCache = new();
@@ -63,8 +81,12 @@ namespace AuroraLauncher
             var limit = Math.Clamp(GetInt(input, "limit", 20), 1, 50);
             var sort = GetString(input, "sort") ?? "downloads";
             var sortField = sort switch { "newest" => 10, "updated" => 3, "relevance" => 2, _ => 6 };
-            var query = new List<string> { "gameId=432", "classId=" + classId, "index=" + offset, "pageSize=" + limit, "sortOrder=desc", "sortField=" + sortField };
             var search = GetString(input, "query");
+            // CurseForge 对 1-2 个字符的搜索会返回全量热门结果（单个响应可达 500 KB、20 秒），
+            // 这里减少短关键词的 pageSize，保证能出结果且不会等到超时。
+            if (!string.IsNullOrWhiteSpace(search) && search!.Trim().Length < 3)
+                limit = Math.Min(limit, 6);
+            var query = new List<string> { "gameId=432", "classId=" + classId, "index=" + offset, "pageSize=" + limit, "sortOrder=desc", "sortField=" + sortField };
             if (!string.IsNullOrWhiteSpace(search)) query.Add("searchFilter=" + Uri.EscapeDataString(search!));
             var mcVersion = GetString(input, "mcVersion");
             if (!string.IsNullOrWhiteSpace(mcVersion)) query.Add("gameVersion=" + Uri.EscapeDataString(mcVersion!));
@@ -403,6 +425,7 @@ namespace AuroraLauncher
                     .Where(entry => entry["required"]?.GetValue<bool>() != false)
                     .ToList();
                 var resolved = new System.Collections.Concurrent.ConcurrentDictionary<(int, int), JsonObject>();
+                var resolveFailed = new System.Collections.Concurrent.ConcurrentBag<(int ProjectId, int FileId)>();
                 long packTotal = 0;
                 using (var resolveGate = new System.Threading.SemaphoreSlim(16))
                 {
@@ -417,10 +440,25 @@ namespace AuroraLauncher
                             resolved[(projectId, modFileId)] = info;
                             System.Threading.Interlocked.Add(ref packTotal, info["fileLength"]?.GetValue<long>() ?? 0);
                         }
-                        catch { }
+                        catch { resolveFailed.Add((projectId, modFileId)); }
                         finally { resolveGate.Release(); }
                     }));
                 }
+                foreach (var item in resolveFailed)
+                {
+                    for (var attempt = 0; attempt < 3 && !resolved.ContainsKey(item); attempt++)
+                    {
+                        try
+                        {
+                            var info = await ResolveFile(item.ProjectId, item.FileId);
+                            resolved[item] = info;
+                            System.Threading.Interlocked.Add(ref packTotal, info["fileLength"]?.GetValue<long>() ?? 0);
+                        }
+                        catch { if (attempt < 2) await Task.Delay(400 * (attempt + 1)); }
+                    }
+                }
+                if (resolved.Count < required.Count)
+                    throw new Exception($"有 {required.Count - resolved.Count} 个模组文件信息获取失败，请重试安装");
                 var doneCount = 0;
                 long packDone = 0;
                 ProgressService.TotalAt(downloadStep, packTotal > 0 ? packTotal : required.Count);
@@ -453,6 +491,7 @@ namespace AuroraLauncher
                             var delta = Math.Max(0, received - lastReceived);
                             lastReceived = received;
                             var aggregate = System.Threading.Interlocked.Add(ref packDone, delta);
+                            if (packTotal > 0) aggregate = Math.Min(aggregate, packTotal);
                             var text = Path.GetFileName(fileName);
                             if (packTotal > 0)
                                 text += " · " + MinecraftInstallService.FormatBytes(aggregate) + " / " + MinecraftInstallService.FormatBytes(packTotal);

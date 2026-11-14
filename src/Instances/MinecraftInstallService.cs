@@ -283,6 +283,7 @@ namespace AuroraLauncher
             var done = 0;
             long downloadedBytes = 0;
             var failed = new System.Collections.Concurrent.ConcurrentBag<(string Url, string Path, string? Sha1, long Size)>();
+            var fileMax = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
             await Task.WhenAll(files.Select(async file =>
             {
@@ -294,13 +295,16 @@ namespace AuroraLauncher
                     var name = Path.GetFileName(file.Path);
                     await DownloadService.Download(file.Url, file.Path, file.Sha1, file.Size, token, (received, _) =>
                     {
-                        var delta = received - last;
-                        if (delta <= 0) return;
+                        var key = file.Path;
+                        var prevMax = fileMax.GetOrAdd(key, 0L);
+                        if (received <= prevMax) return;
+                        var delta = received - prevMax;
+                        fileMax[key] = received;
                         last = received;
                         var aggregate = System.Threading.Interlocked.Add(ref downloadedBytes, delta);
                         var completed = System.Threading.Volatile.Read(ref done);
                         progress?.Invoke(completed, $"{completed}/{files.Count} · {SizeText(aggregate)} · {name}");
-                        byteProgress?.Invoke(completed, aggregate, totalBytes, name);
+                        byteProgress?.Invoke(completed, Math.Min(aggregate, totalBytes), totalBytes, name);
                     });
                     ok = true;
                 }

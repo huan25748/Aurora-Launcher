@@ -242,6 +242,8 @@ namespace AuroraLauncher
 
         public static async Task Download(string url, string destination, string? sha1 = null, long size = 0, CancellationToken token = default, Action<long, long>? onProgress = null)
         {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, ProgressService.ActiveToken);
+            token = linked.Token;
             var key = Path.GetFullPath(destination);
             var gate = FileGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
             await gate.WaitAsync(token);
@@ -285,7 +287,7 @@ namespace AuroraLauncher
                 Exception? smallLast = null;
                 foreach (var candidate in candidates)
                 {
-                    var smallTemp = destination + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
+                    var smallTemp = destination + ".aurora-part";
                     try
                     {
                         using var smallTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -303,7 +305,7 @@ namespace AuroraLauncher
                         smallLast = ex is OperationCanceledException && !token.IsCancellationRequested
                             ? new SlowSourceException("下载源超时，已换源重试")
                             : ex;
-                        try { if (File.Exists(smallTemp)) File.Delete(smallTemp); } catch { }
+
                     }
                 }
                 if (smallLast != null) throw smallLast;
@@ -320,7 +322,7 @@ namespace AuroraLauncher
                     if (attempt < 2 && candidateHost.Length > 0
                         && SlowHosts.TryGetValue(candidateHost, out var slowUntil) && slowUntil > DateTime.UtcNow)
                         continue;
-                    var temp = destination + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
+                    var temp = destination + ".aurora-part";
                     try
                     {
                         var total = size;
@@ -337,7 +339,7 @@ namespace AuroraLauncher
                                 await DownloadMultipartMulti(smallHealthy, temp, total, token, onProgress, contentCdn))
                             {
                                 if (!string.IsNullOrEmpty(sha1) && !CheckSha1(temp, sha1))
-                                    throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination));
+                                { try { File.Delete(temp); } catch { } throw new Exception("SHA1 校验失败：" + Path.GetFileName(destination)); }
                                 if (size > 0 && new FileInfo(temp).Length != size)
                                     throw new Exception("文件大小不匹配：" + Path.GetFileName(destination));
                                 MoveIntoPlace(temp, destination);
@@ -390,7 +392,7 @@ namespace AuroraLauncher
                     {
                         last = slow;
                         if (candidateHost.Length > 0) SlowHosts[candidateHost] = DateTime.UtcNow.AddMinutes(5);
-                        try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+
                     }
                     catch (Exception ex)
                     {
@@ -414,19 +416,27 @@ namespace AuroraLauncher
 
         private static async Task DownloadOnce(string url, string part, long size, CancellationToken token, Action<long, long>? onProgress, bool allowSlow = true)
         {
+            var existing = 0L;
+            try { if (File.Exists(part)) existing = new FileInfo(part).Length; } catch { }
+            if (size > 0 && existing > size) { try { File.Delete(part); } catch { } existing = 0; }
+
             using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             headerTimeout.CancelAfter(TimeSpan.FromSeconds(30));
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.UserAgent.ParseAdd(HttpFactory.UserAgent);
             request.Headers.AcceptEncoding.ParseAdd("identity");
+            if (existing > 0) request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(existing, null);
             using var response = await Pick(request).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headerTimeout.Token);
             if (!response.IsSuccessStatusCode) throw new HttpRequestException($"HTTP {(int)response.StatusCode} {url}");
+
+            var resuming = existing > 0 && response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+            if (!resuming) existing = 0;
             var contentLength = response.Content.Headers.ContentLength ?? 0;
-            var total = size > 0 ? size : contentLength;
-            long received = 0;
+            var total = size > 0 ? size : existing + contentLength;
+            long received = existing;
             var lastEmit = DateTime.UtcNow;
             await using (var input = await response.Content.ReadAsStreamAsync(headerTimeout.Token))
-            await using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
+            await using (var output = new FileStream(part, resuming ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
             {
                 var buffer = new byte[81920];
                 while (true)

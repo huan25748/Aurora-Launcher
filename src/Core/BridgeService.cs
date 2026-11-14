@@ -354,6 +354,9 @@ namespace AuroraLauncher
                     return await ModrinthService.Featured(ArgString(args, 0));
                 case "servers:ping":
                     return await ServerPingService.Ping(ArgString(args, 0));
+                case "progress:cancel":
+                    ProgressService.Cancel(ArgString(args, 0));
+                    return new JsonObject { ["ok"] = true };
                 case "app:pick-directory":
                     return SystemService.PickDirectory(ArgString(args, 0), ArgString(args, 1));
                 case "app:pick-file":
