@@ -60,6 +60,7 @@ namespace AuroraLauncher
                 using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 response.EnsureSuccessStatusCode();
                 var total = response.Content.Headers.ContentLength ?? 0;
+                if (total > 0) ProgressService.TotalAt(step, total);
                 await using (var input = await response.Content.ReadAsStreamAsync())
                 await using (var output = File.Create(target))
                 {
@@ -70,10 +71,20 @@ namespace AuroraLauncher
                     {
                         await output.WriteAsync(buffer.AsMemory(0, read));
                         done += read;
-                        ProgressService.UpdateAt(step, total > 0 ? (double)done / total : 0, "下载启动器");
+                        ProgressService.ProgressAt(step, done,
+                            total > 0
+                                ? $"{done / 1024d / 1024d:0.0} / {total / 1024d / 1024d:0.0} MB"
+                                : $"{done / 1024d / 1024d:0.0} MB");
                     }
                 }
                 if (new FileInfo(target).Length < 1024 * 1024) throw new Exception("下载文件不完整");
+                using (var check = File.OpenRead(target))
+                {
+                    var head = new byte[2];
+                    if (check.Read(head, 0, 2) < 2 || head[0] != (byte)'M' || head[1] != (byte)'Z')
+                        throw new Exception("下载到的不是可执行文件，更新地址可能返回了错误页面");
+                }
+                ProgressService.UpdateAt(step, total > 0 ? total : 1, "更新已下载");
                 WriteUpdater(target, current);
                 ProgressService.Complete();
                 await Task.Delay(300);
@@ -90,28 +101,34 @@ namespace AuroraLauncher
 
         private static void WriteUpdater(string newFile, string current)
         {
-            var script = Path.Combine(Path.GetTempPath(), $"aurora-update-{Guid.NewGuid():N}.cmd");
+            var script = Path.Combine(Path.GetTempPath(), $"aurora-update-{Guid.NewGuid():N}.ps1");
             var pid = Environment.ProcessId;
-            var content = $@"@echo off
-setlocal
-set /a tries=0
-:retry
-copy /y ""{newFile}"" ""{current}"" >nul 2>&1
-if errorlevel 1 (
-  set /a tries+=1
-  if %tries% geq 120 goto fail
-  timeout /t 1 /nobreak >nul
-  goto retry
-)
-start """" ""{current}""
-del ""%~f0""
-exit /b 0
-:fail
-del ""%~f0""
-exit /b 1
+            var newPath = newFile.Replace("'", "''");
+            var currentPath = current.Replace("'", "''");
+            var content = $@"
+$log = Join-Path $env:TEMP 'aurora-update.log'
+function Log([string]$m) {{ Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' ' + $m) }}
+Log 'updater start pid={pid}'
+try {{ Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{ }}
+Start-Sleep -Milliseconds 800
+for ($i = 0; $i -lt 120; $i++) {{
+  try {{
+    Copy-Item -LiteralPath '{newPath}' -Destination '{currentPath}' -Force -ErrorAction Stop
+    Log 'copied'
+    Start-Process -FilePath '{currentPath}'
+    Log 'started'
+    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+    exit 0
+  }} catch {{
+    Log ('copy failed: ' + $_.Exception.Message)
+    Start-Sleep -Seconds 1
+  }}
+}}
+Log 'failed after retries'
 ";
-            File.WriteAllText(script, content);
-            Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + script + "\"")
+            File.WriteAllText(script, content, new System.Text.UTF8Encoding(true));
+            Process.Start(new ProcessStartInfo("powershell.exe",
+                $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\"")
             {
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Hidden,

@@ -121,8 +121,54 @@ namespace AuroraLauncher
             GameEvents.Emit("instances", ListInstances());
         }
 
+        private static DateTime _lastTempCleanup = DateTime.MinValue;
+
+        private static void CleanupTempInstances()
+        {
+            if (DateTime.UtcNow - _lastTempCleanup < TimeSpan.FromMinutes(1)) return;
+            _lastTempCleanup = DateTime.UtcNow;
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(AppPaths.InstancesDir))
+                {
+                    var file = Path.Combine(dir, "instance.json");
+                    if (!File.Exists(file)) continue;
+                    var name = "";
+                    try { name = (JsonNode.Parse(File.ReadAllText(file)) as JsonObject)?["name"]?.GetValue<string>() ?? ""; } catch { }
+                    if (!name.StartsWith("更新临时-", StringComparison.Ordinal)) continue;
+                    if (DateTime.UtcNow - Directory.GetLastWriteTimeUtc(dir) < TimeSpan.FromMinutes(3)) continue;
+                    try { InstallCleanup.Remove(Path.GetFileName(dir)); } catch { }
+                }
+                var versionsRoot = Path.Combine(AppPaths.RootDir, "versions");
+                if (Directory.Exists(versionsRoot))
+                {
+                    var alive = ListInstances().OfType<JsonObject>()
+                        .Select(item => item["name"]?.GetValue<string>() ?? "")
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    foreach (var dir in Directory.GetDirectories(versionsRoot))
+                    {
+                        var name = Path.GetFileName(dir);
+                        if (!name.StartsWith("更新临时-", StringComparison.Ordinal)) continue;
+                        if (alive.Contains(name)) continue;
+                        if (DateTime.UtcNow - Directory.GetLastWriteTimeUtc(dir) < TimeSpan.FromSeconds(10)) continue;
+                        try { Directory.Delete(dir, true); } catch { }
+                    }
+                    foreach (var file in Directory.GetFiles(versionsRoot, "*", SearchOption.AllDirectories))
+                    {
+                        var name = Path.GetFileNameWithoutExtension(file);
+                        if (!name.StartsWith("更新临时-", StringComparison.Ordinal)) continue;
+                        if (alive.Contains(name)) continue;
+                        if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) < TimeSpan.FromSeconds(10)) continue;
+                        try { File.Delete(file); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
         public static JsonArray ListInstances()
         {
+            CleanupTempInstances();
             var result = new JsonArray();
             if (!Directory.Exists(AppPaths.InstancesDir)) return result;
             foreach (var directory in Directory.GetDirectories(AppPaths.InstancesDir).OrderByDescending(Directory.GetLastWriteTimeUtc))
@@ -134,12 +180,24 @@ namespace AuroraLauncher
                     if (JsonNode.Parse(File.ReadAllText(file)) is JsonObject instance)
                     {
                         RepairInstanceVersion(instance, file);
+                        PackMetaService.MergeInto(instance, directory);
+                        if (!HasInstalledVersion(instance)) continue;
                         result.Add(CloneNode(instance));
                     }
                 }
                 catch { }
             }
             return result;
+        }
+
+        private static bool HasInstalledVersion(JsonObject instance)
+        {
+            var versionId = instance["versionId"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(versionId)) return false;
+            var versionJson = Path.Combine(AppPaths.RootDir, "versions", versionId, versionId + ".json");
+            if (File.Exists(versionJson)) return true;
+            var gameDir = instance["gameDir"]?.GetValue<string>() ?? "";
+            return !string.IsNullOrWhiteSpace(gameDir) && File.Exists(Path.Combine(gameDir, versionId + ".json"));
         }
 
         private static void RepairInstanceVersion(JsonObject instance, string file)
@@ -308,21 +366,38 @@ namespace AuroraLauncher
             };
         }
 
+        private static int ArgInt(JsonElement args, int index)
+        {
+            if (args.ValueKind != JsonValueKind.Array || args.GetArrayLength() <= index) return 0;
+            var node = args[index];
+            if (node.ValueKind == JsonValueKind.Number && node.TryGetInt32(out var number)) return number;
+            if (node.ValueKind == JsonValueKind.String && int.TryParse(node.GetString(), out number)) return number;
+            return 0;
+        }
+
         private static string ArgString(JsonElement args, int index)
-            => args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > index ? args[index].GetString() ?? "" : "";
+            => args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > index && args[index].ValueKind == JsonValueKind.String ? args[index].GetString() ?? "" : "";
 
         private static JsonObject InstanceSize(string id)
         {
             long size = 0;
+            long files = 0;
             void Add(string? path)
             {
                 if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
-                try { foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)) { try { size += new FileInfo(file).Length; } catch { } } } catch { }
+                try
+                {
+                    foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    {
+                        try { size += new FileInfo(file).Length; files++; } catch { }
+                    }
+                }
+                catch { }
             }
             var instance = GetInstance(id) as JsonObject;
             Add(Path.Combine(AppPaths.InstancesDir, id));
             Add(instance?["gameDir"]?.GetValue<string>());
-            return new JsonObject { ["size"] = size };
+            return new JsonObject { ["size"] = size, ["files"] = files };
         }
 
         public static JsonArray LatestLogs()
@@ -417,13 +492,15 @@ namespace AuroraLauncher
                 case "storage:stats":
                     return SystemService.StorageStats();
                 case "storage:clean":
-                    return SystemService.Clean();
+                    return new JsonObject { ["freed"] = SystemService.Clean() };
                 case "storage:prune":
                     return SystemService.Prune();
                 case "settings:reset":
                     return ResetSettings();
                 case "instances:list":
                     return ListInstances();
+                case "instances:detect-pack":
+                    return PackDetectService.Detect(ArgString(args, 0));
                 case "instances:get":
                     return GetInstance(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0
                         ? args[0].GetString() ?? ""
@@ -497,6 +574,8 @@ namespace AuroraLauncher
                     NotifyInstances();
                     return null;
                 }
+                case "instances:update-pack":
+                    return await ModpackUpdateService.Update(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2), ArgString(args, 3));
                 case "instances:copy":
                 {
                     var id = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetString() ?? "" : "";
@@ -544,16 +623,16 @@ namespace AuroraLauncher
                 case "curseforge:categories":
                     return await CurseForgeService.Categories(ArgString(args, 0));
                 case "curseforge:project":
-                    return await CurseForgeService.Project(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0);
+                    return await CurseForgeService.Project(ArgInt(args, 0));
                 case "curseforge:file-count":
-                    return await CurseForgeService.FileCount(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0);
+                    return await CurseForgeService.FileCount(ArgInt(args, 0));
                 case "curseforge:files-page":
                     return await CurseForgeService.FilesPage(
                         args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0,
                         args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 1 ? args[1].GetInt32() : 0,
                         args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 2 ? args[2].GetInt32() : 1000);
                 case "curseforge:files":
-                    return await CurseForgeService.Files(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetInt32() : 0, ArgString(args, 1), ArgString(args, 2));
+                    return await CurseForgeService.Files(ArgInt(args, 0), ArgString(args, 1), ArgString(args, 2));
                 case "mods:dependencies":
                     return await DependencyService.Plan(args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0] : default);
                 case "curseforge:install":
@@ -611,7 +690,7 @@ namespace AuroraLauncher
                 case "instances:size":
                 {
                     var id = args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 ? args[0].GetString() ?? "" : "";
-                    return InstanceSize(id);
+                    return await System.Threading.Tasks.Task.Run(() => InstanceSize(id));
                 }
                 case "instances:open-folder":
                 {
@@ -706,6 +785,10 @@ namespace AuroraLauncher
                         args[0].GetString() ?? "",
                         args.GetArrayLength() < 2 || args[1].ValueKind != JsonValueKind.False,
                         args.GetArrayLength() > 2 ? args[2].GetString() : null);
+                case "content:icons":
+                    return await ContentService.Icons(ArgString(args, 0), ArgString(args, 1));
+                case "content:counts":
+                    return ContentService.Counts(ArgString(args, 0));
                 case "content:list":
                     return await ContentService.List(ArgString(args, 0), ArgString(args, 1));
                 case "content:worlds":

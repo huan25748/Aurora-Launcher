@@ -419,6 +419,12 @@ namespace AuroraLauncher
             var existing = 0L;
             try { if (File.Exists(part)) existing = new FileInfo(part).Length; } catch { }
             if (size > 0 && existing > size) { try { File.Delete(part); } catch { } existing = 0; }
+            // CurseForge edge 在带 Range 的 302 跳转后会返回 404；这类源不走续传，直接整文件下载。
+            if (existing > 0 && (url.Contains("forgecdn.net", StringComparison.OrdinalIgnoreCase) || url.Contains("mediafilez", StringComparison.OrdinalIgnoreCase)))
+            {
+                try { File.Delete(part); } catch { }
+                existing = 0;
+            }
 
             using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             headerTimeout.CancelAfter(TimeSpan.FromSeconds(30));

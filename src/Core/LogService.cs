@@ -147,6 +147,22 @@ namespace AuroraLauncher
                     }
                 }
                 catch { }
+                var hasCrashMarker = text.Contains("#@!@# Game crashed") || text.Contains("A fatal error has been detected") || text.Contains("Minecraft Crash Report");
+                var freshCrashReport = false;
+                try
+                {
+                    var crashDir2 = Path.Combine(LogsDir(instanceId), "..", "crash-reports");
+                    if (Directory.Exists(crashDir2))
+                    {
+                        var newest2 = Directory.GetFiles(crashDir2, "*.txt").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+                        var lastPlayed2 = instance?["lastPlayedAt"]?.GetValue<long>() ?? 0;
+                        freshCrashReport = newest2 != null && (lastPlayed2 <= 0 || File.GetLastWriteTimeUtc(newest2) >= DateTimeOffset.FromUnixTimeMilliseconds(lastPlayed2).UtcDateTime.AddHours(-2));
+                    }
+                }
+                catch { }
+                if (!hasCrashMarker && !freshCrashReport) return null;
+                var v2 = CrashAnalyzerV2.Analyze(text);
+                if (v2 != null) return v2;
                 string? LineOf(string token)
                 {
                     foreach (var line in text.Split('\n'))
@@ -174,6 +190,10 @@ namespace AuroraLauncher
                     evidence.Add(LineOf(hit) ?? hit);
                 }
 
+                MatchAny("模组命令/数据错误", "有模组在注册命令或读取数据时出错，通常是整合包数据与当前模组版本不匹配。",
+                    new[] { "检查最近更新的模组（如 FTB Chunks、FTB Quests、LaserIO）是否与当前游戏版本匹配。", "删除或更新报错 mod 对应的配置/数据后重试。" },
+                    "CommandSyntaxException", "Error while building entry");
+                if (!text.Contains("CommandSyntaxException", StringComparison.OrdinalIgnoreCase) && !text.Contains("Error while building entry", StringComparison.OrdinalIgnoreCase))
                 MatchAny("登录验证失败", "Minecraft 登录令牌验证失败（HTTP 401），不是模组或 Mixin 问题。",
                     new[] { "在账户页面重新登录 Microsoft 账户。", "检查系统时间是否准确，然后重启启动器。" },
                     "MinecraftClientHttpException: Status: 401");

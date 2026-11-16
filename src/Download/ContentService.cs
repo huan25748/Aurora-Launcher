@@ -172,7 +172,7 @@ namespace AuroraLauncher
             catch { return null; }
         }
 
-        private static string? PackIcon(string file)
+        private static string? LocalPackIcon(string file)
         {
             try
             {
@@ -187,7 +187,117 @@ namespace AuroraLauncher
             catch { return null; }
         }
 
-        public static async Task<JsonArray> List(string instanceId, string kind)
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string?> ShaderIconCache = new(StringComparer.OrdinalIgnoreCase);
+
+        private static string? OnlineShaderIcon(string file)
+        {
+            var hash = Sha1(file);
+            if (hash.Length == 40 && ShaderIconCache.TryGetValue(hash, out var cached)) return cached;
+            string? icon = null;
+            try
+            {
+                if (hash.Length == 40)
+                {
+                    var byHash = ModrinthService.Icons(new[] { hash }).GetAwaiter().GetResult();
+                    if (byHash.TryGetValue(hash, out var hashIcon)) icon = hashIcon;
+                }
+            }
+            catch { }
+            if (string.IsNullOrWhiteSpace(icon))
+            {
+                var name = Path.GetFileNameWithoutExtension(file);
+                try
+                {
+                    var spaced = System.Text.RegularExpressions.Regex.Replace(name, "([a-z])([A-Z])", "$1 $2");
+                    var query = System.Text.RegularExpressions.Regex.Replace(spaced, @"[_\-.]?v?\d+(\.\d+)*.*$", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Replace('_', ' ').Trim();
+                    if (query.Length >= 3)
+                    {
+                        var input = System.Text.Json.JsonSerializer.SerializeToElement(new { query, projectType = "shader", limit = 5 });
+                        var result = ModrinthService.Search(input).GetAwaiter().GetResult();
+                        var hit = (result["hits"] as JsonArray)?.OfType<JsonObject>().FirstOrDefault();
+                        icon = hit?["icon_url"]?.GetValue<string>();
+                    }
+                }
+                catch { }
+            }
+            if (hash.Length == 40) ShaderIconCache[hash] = icon;
+            return icon;
+        }
+
+        public static Task<JsonObject> Icons(string instanceId, string kind) => Task.Run(() => IconsCore(instanceId, kind));
+
+        private static JsonObject IconsCore(string instanceId, string kind)
+        {
+            var result = new JsonObject();
+            // 只给光影补在线封面；模组/资源包已有本地图标，避免对几百个 jar 做哈希。
+            if (!string.Equals(kind, "shaderpacks", StringComparison.OrdinalIgnoreCase)) return result;
+            try
+            {
+                var dir = ContentDir(instanceId, kind);
+                if (!Directory.Exists(dir)) return result;
+                foreach (var file in Directory.GetFiles(dir))
+                {
+                    var name = Path.GetFileName(file);
+                    if (name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (kind == "mods" && !name.EndsWith(".jar", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (kind != "mods" && !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (LocalPackIcon(file) != null) continue;
+                    var icon = OnlineShaderIcon(file);
+                    if (!string.IsNullOrWhiteSpace(icon)) result[name] = icon;
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        public static JsonObject Counts(string instanceId)
+        {
+            int CountFiles(string kind, string ext)
+            {
+                try
+                {
+                    var dir = ContentDir(instanceId, kind);
+                    if (!Directory.Exists(dir)) return 0;
+                    return Directory.GetFiles(dir).Count(file =>
+                        file.EndsWith(ext, StringComparison.OrdinalIgnoreCase) ||
+                        file.EndsWith(ext + ".disabled", StringComparison.OrdinalIgnoreCase));
+                }
+                catch { return 0; }
+            }
+            int CountDirs(string sub)
+            {
+                try
+                {
+                    var dir = Path.Combine(GameDir(instanceId), sub);
+                    return Directory.Exists(dir) ? Directory.GetDirectories(dir).Length : 0;
+                }
+                catch { return 0; }
+            }
+            int CountScreenshots()
+            {
+                try
+                {
+                    var dir = Path.Combine(GameDir(instanceId), "screenshots");
+                    return Directory.Exists(dir)
+                        ? Directory.GetFiles(dir).Count(file => file.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase))
+                        : 0;
+                }
+                catch { return 0; }
+            }
+            return new JsonObject
+            {
+                ["mods"] = CountFiles("mods", ".jar"),
+                ["resourcepacks"] = CountFiles("resourcepacks", ".zip"),
+                ["shaderpacks"] = CountFiles("shaderpacks", ".zip"),
+                ["worlds"] = CountDirs("saves"),
+                ["screenshots"] = CountScreenshots(),
+                ["servers"] = NbtServersService.List(instanceId).Count
+            };
+        }
+
+        public static Task<JsonArray> List(string instanceId, string kind) => Task.Run(() => ListCore(instanceId, kind));
+
+        private static JsonArray ListCore(string instanceId, string kind)
         {
             var dir = ContentDir(instanceId, kind);
             var result = new JsonArray();
@@ -223,7 +333,7 @@ namespace AuroraLauncher
                 foreach (var item in result.OfType<JsonObject>())
                 {
                     var path = item["path"]?.GetValue<string>() ?? "";
-                    var icon = kind == "mods" ? ModIcon(path) : PackIcon(path);
+                    var icon = kind == "mods" ? ModIcon(path) : LocalPackIcon(path);
                     if (icon != null) item["iconData"] = icon;
                 }
                 if (kind == "mods")
@@ -322,9 +432,18 @@ namespace AuroraLauncher
                 catch { }
                 long mtime = 0;
                 try { mtime = new DateTimeOffset(Directory.GetLastWriteTimeUtc(folder)).ToUnixTimeMilliseconds(); } catch { }
+                string? icon = null;
+                try
+                {
+                    var iconPath = Path.Combine(folder, "icon.png");
+                    if (File.Exists(iconPath) && new FileInfo(iconPath).Length is > 0 and < 1048576)
+                        icon = "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(iconPath));
+                }
+                catch { }
                 result.Add(new JsonObject
                 {
                     ["name"] = name,
+                    ["icon"] = icon,
                     ["folderName"] = name,
                     ["path"] = folder,
                     ["size"] = size,

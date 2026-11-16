@@ -348,7 +348,7 @@ namespace AuroraLauncher
             return new JsonObject { ["installed"] = new JsonArray(fileName) };
         }
 
-        public static async Task<JsonObject> InstallPack(string projectId, string? instanceName, string? versionId)
+        public static async Task<JsonObject> InstallPack(string projectId, string? instanceName, string? versionId, bool allowMissing = false, string? reuseDir = null)
         {
             var packTitle = "安装整合包";
             JsonObject? projectInfo = null;
@@ -456,6 +456,8 @@ namespace AuroraLauncher
             ProgressService.UpdateAt(baseStep, 1, "安装完成");
             var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", instance["versionId"]?.GetValue<string>() ?? "");
             var packCache = Path.Combine(AppPaths.SettingsDir, "cache", "packs", "files", projectId);
+            var packMissing = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var packFiles = new System.Collections.Generic.List<string>();
             if (index["files"] is JsonArray files)
             {
                 var downloadStep = ProgressService.Step("下载整合包文件", files.Count, files.Count + " 个文件");
@@ -480,6 +482,17 @@ namespace AuroraLauncher
                         var cacheFile = Path.Combine(packCache, path.Replace('/', Path.DirectorySeparatorChar));
                         try { if (File.Exists(cacheFile) && new FileInfo(cacheFile).Length > 0) { Directory.CreateDirectory(Path.GetDirectoryName(target)!); File.Copy(cacheFile, target, true); var cachedDone = System.Threading.Interlocked.Increment(ref doneCount); ProgressService.ProgressAt(downloadStep, packTotal > 0 ? System.Threading.Interlocked.Read(ref packDone) : cachedDone, "缓存：" + Path.GetFileName(target)); return; } } catch { }
                         var expected = entry["fileSize"]?.GetValue<long>() ?? 0;
+                        if (reuseDir != null && expected > 0)
+                        {
+                            var reusePath = Path.Combine(reuseDir, path.Replace('/', Path.DirectorySeparatorChar));
+                            if (File.Exists(reusePath) && new FileInfo(reusePath).Length == expected)
+                            {
+                                packFiles.Add(path);
+                                var reusedDone = System.Threading.Interlocked.Increment(ref doneCount);
+                                ProgressService.ProgressAt(downloadStep, packTotal > 0 ? System.Threading.Interlocked.Read(ref packDone) : reusedDone, "复用：" + Path.GetFileName(target));
+                                return;
+                            }
+                        }
                         try { if (File.Exists(target) && (expected <= 0 || new FileInfo(target).Length == expected)) { var skipped = System.Threading.Interlocked.Increment(ref doneCount); ProgressService.ProgressAt(downloadStep, packTotal > 0 ? System.Threading.Interlocked.Read(ref packDone) : skipped, "已存在：" + Path.GetFileName(target)); return; } } catch { }
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                         Exception? last = null;
@@ -500,13 +513,14 @@ namespace AuroraLauncher
                                     ProgressService.ProgressAt(downloadStep, packTotal > 0 ? aggregate : doneCount, text);
                                 });
                                 try { Directory.CreateDirectory(Path.GetDirectoryName(cacheFile)!); File.Copy(target, cacheFile, true); } catch { }
+                                packFiles.Add(path);
                                 last = null; break;
                             }
                             catch (Exception ex) { last = ex; }
                         }
                         if (last != null) throw last;
                     }
-                    catch { }
+                    catch { packMissing.Add(path); }
                     finally
                     {
                         gate.Release();
@@ -515,6 +529,8 @@ namespace AuroraLauncher
                     }
                 }));
                 ProgressService.UpdateAt(downloadStep, packTotal > 0 ? packTotal : (index["files"] as JsonArray)?.Count ?? 0, "整合包文件已下载");
+                if (packMissing.Count > 0 && !allowMissing)
+                    throw new Exception($"有 {packMissing.Count} 个整合包文件下载失败，请重新安装重试");
             }
             foreach (var folder in new[] { "overrides", "client-overrides" })
             {
@@ -528,10 +544,11 @@ namespace AuroraLauncher
                     File.Copy(source, target, true);
                 }
             }
+            try { PackMetaService.Save(instanceId, "modrinth", projectId, version["id"]?.GetValue<string>() ?? "", packFiles); } catch { }
             try { Directory.Delete(temp, true); } catch { }
             try { File.Delete(zipPath); } catch { }
             ProgressService.CompletePack();
-            return new JsonObject { ["instanceId"] = instanceId };
+            return new JsonObject { ["instanceId"] = instanceId, ["missing"] = new JsonArray(packMissing.Select(item => (JsonNode)item!).ToArray()), ["packFiles"] = new JsonArray(packFiles.Select(item => (JsonNode)item!).ToArray()) };
             }
             catch
             {

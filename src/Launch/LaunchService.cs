@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 namespace AuroraLauncher
 {
@@ -356,7 +357,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "2.1.3",
+                    ["${launcher_version}"] = "2.3.1",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -388,7 +389,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.1.3");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.3.1");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
@@ -436,7 +437,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=2.1.3");
+                args.Add("-Dminecraft.launcher.version=2.3.1");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
@@ -534,6 +535,7 @@ namespace AuroraLauncher
                 process.BeginErrorReadLine();
                 _suppressLogs = false;
                 StartLogWatcher(gameDir, process);
+                KeepGameTopmost(process);
 
 
                 _startedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -688,22 +690,72 @@ namespace AuroraLauncher
             return "\"" + arg.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
         }
 
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+        private static readonly IntPtr HwndTopmost = new(-1);
+        private const uint SwpNoSize = 0x0001;
+        private const uint SwpNoMove = 0x0002;
+
+        private static void KeepGameTopmost(Process process)
+        {
+            _ = Task.Run(async () =>
+            {
+                for (var i = 0; i < 120; i++)
+                {
+                    try
+                    {
+                        if (process.HasExited) return;
+                        process.Refresh();
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                        {
+                            SetWindowPos(process.MainWindowHandle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize);
+                            return;
+                        }
+                    }
+                    catch { return; }
+                    await Task.Delay(500);
+                }
+            });
+        }
+
         private static void OnExited(Process process)
         {
             try { _logWatch?.Cancel(); } catch { }
             FlushTail(20);
             _suppressLogs = true;
             var code = process.ExitCode;
+            var startedAt = _startedAtMs;
+            var runId = _runningInstanceId;
+            var crashed = code != 0 && HasFreshCrash(runId, startedAt);
+            string? report = null;
+            if (crashed)
+            {
+                try
+                {
+                    var analysis = LogService.Analyze(runId);
+                    var summary = analysis?["summary"]?.GetValue<string>() ?? "";
+                    if (!string.IsNullOrWhiteSpace(summary))
+                    {
+                        report = "原因：" + summary;
+                        if (analysis?["suggestions"] is JsonArray suggestions && suggestions.Count > 0)
+                            report += "\n建议：" + string.Join("；", suggestions.OfType<JsonNode>().Select(item => item.GetValue<string>()).Where(item => !string.IsNullOrWhiteSpace(item)).Take(3));
+                    }
+                }
+                catch { }
+                report ??= $"游戏异常退出（代码 {code}）。未找到可识别的崩溃特征，请打开日志文件查看。";
+            }
             lock (Gate)
             {
                 _state = new JsonObject
                 {
-                    ["state"] = code == 0 ? "exited" : "crashed",
+                    ["state"] = crashed ? "crashed" : "exited",
                     ["exitCode"] = code,
                     ["pid"] = process.Id,
                     ["instanceId"] = _state["instanceId"]?.GetValue<string>(),
                     ["instanceName"] = _state["instanceName"]?.GetValue<string>()
                 };
+                if (report != null) _state["crashReport"] = report;
                 _process = null;
             }
             EmitLog("error", $"游戏进程退出，代码 {code}");
@@ -711,6 +763,22 @@ namespace AuroraLauncher
             _startedAtMs = 0;
             _runningInstanceId = "";
             GameEvents.Emit("game", State());
+        }
+
+        private static bool HasFreshCrash(string instanceId, long startedAt)
+        {
+            if (string.IsNullOrWhiteSpace(instanceId) || startedAt <= 0) return false;
+            try
+            {
+                var instance = BridgeService.GetInstance(instanceId) as JsonObject;
+                var gameDir = instance?["gameDir"]?.GetValue<string>()
+                    ?? Path.Combine(AppPaths.RootDir, "versions", instance?["versionId"]?.GetValue<string>() ?? "");
+                var dir = Path.Combine(gameDir, "crash-reports");
+                if (!Directory.Exists(dir)) return false;
+                var newest = Directory.GetFiles(dir, "*.txt").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+                return newest != null && File.GetLastWriteTimeUtc(newest) >= DateTimeOffset.FromUnixTimeMilliseconds(startedAt - 5000).UtcDateTime;
+            }
+            catch { return false; }
         }
 
         private static void AddPlayTime(string instanceId, long startedAtMs)

@@ -176,6 +176,21 @@ namespace AuroraLauncher
             var filtered = !string.IsNullOrWhiteSpace(mcVersion);
             if (!filtered && FileCache.TryGetValue(id, out var cached) && DateTime.UtcNow - cached.At < TimeSpan.FromMinutes(30))
                 return (JsonArray)JsonNode.Parse(cached.Data.ToJsonString())!;
+            if (!filtered)
+            {
+                // CurseForge 单页最多 50 条，pageSize=10000 会直接 400，导致版本列表为空。
+                var all = new JsonArray();
+                var total = await FileCount(id);
+                for (var index = 0; index < total && index < 5000; index += 50)
+                {
+                    var page = await FilesPage(id, index, 50);
+                    if (page.Count == 0) break;
+                    foreach (var item in page) all.Add(item?.DeepCloneCompat());
+                    if (page.Count < 50) break;
+                }
+                FileCache[id] = (DateTime.UtcNow, (JsonArray)JsonNode.Parse(all.ToJsonString())!);
+                return all;
+            }
 
             var query = new List<string>();
             if (filtered) query.Add("gameVersion=" + Uri.EscapeDataString(mcVersion!));
@@ -289,7 +304,7 @@ namespace AuroraLauncher
             return new JsonObject { ["installed"] = new JsonArray(fileName) };
         }
 
-        public static async Task<JsonObject> InstallPack(JsonElement input)
+        public static async Task<JsonObject> InstallPack(JsonElement input, bool allowMissing = false, string? reuseDir = null)
         {
             var modId = GetInt(input, "modId", 0);
             var fileId = GetInt(input, "fileId", 0);
@@ -412,6 +427,7 @@ namespace AuroraLauncher
             var modsDir = Path.Combine(gameDir, "mods");
             Directory.CreateDirectory(modsDir);
             var missing = new JsonArray();
+            var packFiles = new List<string>();
             var downloaded = 0;
             if (manifest["files"] is JsonArray files)
             {
@@ -424,6 +440,7 @@ namespace AuroraLauncher
                 var required = files.OfType<JsonObject>()
                     .Where(entry => entry["required"]?.GetValue<bool>() != false)
                     .ToList();
+                ProgressService.TotalAt(downloadStep, required.Count);
                 var resolved = new System.Collections.Concurrent.ConcurrentDictionary<(int, int), JsonObject>();
                 var resolveFailed = new System.Collections.Concurrent.ConcurrentBag<(int ProjectId, int FileId)>();
                 long packTotal = 0;
@@ -461,12 +478,13 @@ namespace AuroraLauncher
                     throw new Exception($"有 {required.Count - resolved.Count} 个模组文件信息获取失败，请重试安装");
                 var doneCount = 0;
                 long packDone = 0;
-                ProgressService.TotalAt(downloadStep, packTotal > 0 ? packTotal : required.Count);
+                ProgressService.TotalAt(downloadStep, required.Count);
                 using var gate = new System.Threading.SemaphoreSlim(8);
                 await Task.WhenAll(required.Select(async entry =>
                 {
                     var projectId = entry["projectID"]?.GetValue<int>() ?? 0;
                     var modFileId = entry["fileID"]?.GetValue<int>() ?? 0;
+                    var failedFileName = "";
                     try
                     {
                         await gate.WaitAsync();
@@ -484,24 +502,46 @@ namespace AuroraLauncher
                                 : Path.Combine(gameDir, "resourcepacks");
                         }
                         Directory.CreateDirectory(destDir);
-                        ProgressService.Detail(Path.GetFileName(fileName));
-                        long lastReceived = 0;
-                        await DownloadFile(info, Path.Combine(destDir, Path.GetFileName(fileName)), (received, totalBytes) =>
+                        if (reuseDir != null)
                         {
-                            var delta = Math.Max(0, received - lastReceived);
-                            lastReceived = received;
-                            var aggregate = System.Threading.Interlocked.Add(ref packDone, delta);
-                            if (packTotal > 0) aggregate = Math.Min(aggregate, packTotal);
-                            var text = Path.GetFileName(fileName);
-                            if (packTotal > 0)
-                                text += " · " + MinecraftInstallService.FormatBytes(aggregate) + " / " + MinecraftInstallService.FormatBytes(packTotal);
-                            ProgressService.ProgressAt(downloadStep, packTotal > 0 ? aggregate : doneCount, text);
-                        });
+                            var reusePath = Path.Combine(reuseDir, Path.GetFileName(fileName));
+                            var wanted = info["fileLength"]?.GetValue<long>() ?? -1;
+                            if (wanted >= 0 && File.Exists(reusePath) && new FileInfo(reusePath).Length == wanted)
+                            {
+                                packFiles.Add(Path.GetFileName(fileName));
+                                downloaded++;
+                                return;
+                            }
+                        }
+                        ProgressService.Detail(Path.GetFileName(fileName));
+                        failedFileName = fileName;
+                        Exception? lastError = null;
+                        for (var attempt = 0; attempt < 3; attempt++)
+                        {
+                            long lastReceived = 0;
+                            try
+                            {
+                                await DownloadFile(info, Path.Combine(destDir, Path.GetFileName(fileName)), (received, totalBytes) =>
+                                {
+                                    ProgressService.ProgressAt(downloadStep, doneCount,
+                                        $"{doneCount}/{required.Count} · {Path.GetFileName(fileName)}");
+                                });
+                                lastError = null;
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                lastError = ex;
+                                if (attempt < 2) await Task.Delay(600 * (attempt + 1));
+                            }
+                        }
+                        if (lastError != null) throw lastError;
+                        packFiles.Add(Path.GetFileName(fileName));
                         downloaded++;
                     }
                     catch (Exception ex)
                     {
-                        missing.Add(new JsonObject { ["projectId"] = projectId, ["fileId"] = modFileId, ["reason"] = ex.Message });
+                        missing.Add(new JsonObject { ["projectId"] = projectId, ["fileId"] = modFileId, ["fileName"] = failedFileName, ["reason"] = ex.Message });
                     }
                     finally
                     {
@@ -510,7 +550,12 @@ namespace AuroraLauncher
                         if (packTotal <= 0) ProgressService.ProgressAt(downloadStep, done, $"{done}/{required.Count}");
                     }
                 }));
-                ProgressService.UpdateAt(downloadStep, packTotal > 0 ? packTotal : required.Count, "下载完成");
+                ProgressService.UpdateAt(downloadStep, required.Count, "下载完成");
+                if (missing.Count > 0 && !allowMissing)
+                {
+                    var names = string.Join("、", missing.Take(5).Select(item => item["reason"]?.GetValue<string>() is string reason ? reason : "未知文件"));
+                    throw new Exception($"有 {missing.Count} 个模组下载失败，请重新安装重试：{names}");
+                }
             }
             foreach (var folder in new[] { manifest["overrides"]?.GetValue<string>() ?? "overrides", "client-overrides" })
             {
@@ -545,10 +590,11 @@ namespace AuroraLauncher
                     File.Copy(source, target, true);
                 }
             }
+            PackMetaService.Save(instanceId, "curseforge", modId.ToString(), fileId.ToString(), packFiles);
             try { Directory.Delete(temp, true); } catch { }
             try { File.Delete(zipPath); } catch { }
             ProgressService.CompletePack();
-            return new JsonObject { ["instanceId"] = instanceId, ["missing"] = missing, ["files"] = downloaded };
+            return new JsonObject { ["instanceId"] = instanceId, ["missing"] = missing, ["files"] = downloaded, ["packFiles"] = new JsonArray(packFiles.Select(item => (JsonNode)item!).ToArray()) };
             }
             catch
             {

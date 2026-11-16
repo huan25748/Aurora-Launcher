@@ -13,6 +13,7 @@ namespace AuroraLauncher
             var instanceDir = Path.Combine(AppPaths.InstancesDir, instanceId);
             string? gameDir = null;
             string? versionId = null;
+            string? instanceName = null;
             try
             {
                 var file = Path.Combine(instanceDir, "instance.json");
@@ -20,6 +21,7 @@ namespace AuroraLauncher
                 {
                     gameDir = instance["gameDir"]?.GetValue<string>();
                     versionId = instance["versionId"]?.GetValue<string>();
+                    instanceName = instance["name"]?.GetValue<string>();
                 }
             }
             catch { }
@@ -32,6 +34,19 @@ namespace AuroraLauncher
             catch { }
             try
             {
+                var safeName = string.Concat((instanceName ?? "").Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)).Trim().TrimEnd('.');
+                if (!string.IsNullOrWhiteSpace(safeName))
+                {
+                    var namedDir = Path.Combine(AppPaths.RootDir, "versions", safeName);
+                    var used = BridgeService.ListInstances().OfType<JsonObject>().Any(item =>
+                        string.Equals(item["name"]?.GetValue<string>(), instanceName, StringComparison.Ordinal));
+                    if (!used)
+                    {
+                        if (Directory.Exists(namedDir)) Directory.Delete(namedDir, true);
+                        try { var namedJson = Path.Combine(AppPaths.RootDir, "versions", safeName + ".json"); if (File.Exists(namedJson)) File.Delete(namedJson); } catch { }
+                        try { var namedJar = Path.Combine(AppPaths.RootDir, "versions", safeName + ".jar"); if (File.Exists(namedJar)) File.Delete(namedJar); } catch { }
+                    }
+                }
                 if (!string.IsNullOrWhiteSpace(versionId))
                 {
                     var versionDir = Path.Combine(AppPaths.RootDir, "versions", versionId!);
