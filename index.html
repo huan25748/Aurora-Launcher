@@ -191,6 +191,7 @@
       <a href="#features">特性</a>
       <a href="#download">下载</a>
       <a href="#requirements">运行要求</a>
+      <a href="#changelog">更新日志</a>
       <a href="#faq">常见问题</a>
       <a href="https://github.com/huan25748/Aurora-Launcher" target="_blank" rel="noopener">GitHub 仓库</a>
     </nav>
@@ -201,14 +202,14 @@
 
   <section class="hero">
     <div>
-      <span class="pill"><span class="dot"></span> 2.3.0 正式版 · Windows x64</span>
+      <span class="pill"><span class="dot"></span> 2.3.1 正式版 · Windows x64</span>
       <h1>一个完整的<br><span class="grad">Minecraft 启动器</span></h1>
       <p class="lead">
         Aurora Launcher 使用 .NET 6 + WPF + WebView2 重写，安装、下载、账户、联机与实例管理都在原生后端完成。
         支持原版与 Fabric / Quilt / Forge / NeoForge / OptiFine，内置 Modrinth 与 CurseForge 内容管理。
       </p>
       <div class="hero-actions">
-        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/download/2.3.0/AuroraLauncher.exe" target="_blank" rel="noopener">
+        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/download/2.3.1/AuroraLauncher.exe" target="_blank" rel="noopener">
           下载最新版
         </a>
         <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">
@@ -350,7 +351,7 @@
         <p style="color:var(--soft);margin:0">
           最新版发布在 Gitee Releases，历史版本全部保留，可随时回退。
         </p>
-        <div class="ver">当前版本 <b>2.3.0</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
+        <div class="ver">当前版本 <b>2.3.1</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/latest" target="_blank" rel="noopener">前往 Gitee 下载最新版</a>
           <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">历史版本</a>
@@ -381,6 +382,33 @@
         <tr><td>数据位置</td><td>配置与账户在 <code>&lt;exe目录&gt;/.aurora</code>，游戏在 <code>.minecraft</code></td></tr>
       </tbody>
     </table>
+  </section>
+
+
+  <section id="changelog">
+    <div class="head">
+      <div class="eyebrow">CHANGELOG</div>
+      <h2>2.3.1 更新日志</h2>
+      <p>本次只列出相对 2.3.0 的变化。</p>
+    </div>
+    <div class="card">
+      <h3>实例管理</h3>
+      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
+        <li>删除 <code>versions</code> 下的游戏文件夹后，对应实例会从列表消失，与 PCL 行为一致。</li>
+        <li>实例页「导入 .minecraft 版本」按钮改为「重新扫描」。</li>
+      </ul>
+      <h3>整合包更新</h3>
+      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
+        <li>新增按模组名主体去重，清理 PCL 旧实例遗留的重复版本。</li>
+        <li>允许重新安装当前版本，用于修复和去重。</li>
+      </ul>
+      <h3>更新器</h3>
+      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
+        <li>更新器改为 PowerShell：等待旧进程退出后替换 exe 并自动重启，日志写入 <code>%TEMP%\aurora-update.log</code>。</li>
+        <li>修复更新下载进度一直停在 0% 的问题。</li>
+        <li>校验下载文件是否为可执行文件，避免用错误页面覆盖启动器。</li>
+      </ul>
+    </div>
   </section>
 
   <section id="faq">
