@@ -88,7 +88,7 @@ namespace AuroraLauncher
             catch (Exception ex)
             {
                 Log("root failed: " + ex.Message);
-                return result;
+                throw new Exception("无法获取版本的前置信息：" + ex.Message);
             }
 
             foreach (var item in pending) queue.Enqueue(item);
@@ -175,7 +175,24 @@ namespace AuroraLauncher
                         }
                     }
                     }
-                    catch { continue; }
+                    catch (Exception ex)
+                    {
+                        Log($"resolve failed {item.Source}:{item.ProjectId}: {ex.Message}");
+                        result.Add(new JsonObject
+                        {
+                            ["key"] = key,
+                            ["source"] = item.Source,
+                            ["projectId"] = item.ProjectId,
+                            ["modId"] = 0,
+                            ["fileId"] = 0,
+                            ["versionId"] = item.VersionId,
+                            ["name"] = "前置解析失败",
+                            ["fileName"] = ex.Message,
+                            ["installed"] = false,
+                            ["required"] = !item.Optional,
+                            ["error"] = true
+                        });
+                    }
                 }
             }
             if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("requiredOnly", out var requiredOnly) && requiredOnly.ValueKind == JsonValueKind.True)
@@ -238,7 +255,7 @@ namespace AuroraLauncher
             JsonObject project;
             try { project = await CurseForgeService.Project(modId); }
             catch { project = new JsonObject { ["name"] = file["fileName"]?.GetValue<string>() ?? ("mod " + modId), ["slug"] = "" }; }
-            return new JsonObject { ["file"] = file.DeepCloneCompat(), ["project"] = project };
+            return new JsonObject { ["file"] = file.DeepCloneCompat(), ["project"] = project.DeepCloneCompat() };
         }
 
         private static async Task<JsonObject?> ResolveModrinth(string projectId, string versionId, string mcVersion, string loader)
@@ -248,7 +265,7 @@ namespace AuroraLauncher
             {
                 try { pinned = await ModrinthService.VersionById(versionId); } catch { }
             }
-            var versions = pinned != null ? new JsonArray(pinned) : await ModrinthService.Versions(projectId, mcVersion, loader);
+            var versions = pinned != null ? new JsonArray(pinned.DeepCloneCompat()) : await ModrinthService.Versions(projectId, mcVersion, loader);
             if (string.IsNullOrWhiteSpace(projectId) && pinned != null)
                 projectId = pinned["project_id"]?.GetValue<string>() ?? "";
             JsonObject? version = null;
@@ -268,7 +285,7 @@ namespace AuroraLauncher
             JsonObject project;
             try { project = await ModrinthService.Project(projectId); }
             catch { project = new JsonObject { ["title"] = file["filename"]?.GetValue<string>() ?? projectId, ["slug"] = "" }; }
-            return new JsonObject { ["version"] = version.DeepCloneCompat(), ["file"] = file.DeepCloneCompat(), ["project"] = project };
+            return new JsonObject { ["version"] = version.DeepCloneCompat(), ["file"] = file.DeepCloneCompat(), ["project"] = project.DeepCloneCompat() };
         }
 
         private sealed class InstalledMods
@@ -296,6 +313,13 @@ namespace AuroraLauncher
                     var name = Path.GetFileName(path);
                     installed.FileNames.Add(name);
                     installed.FileNames.Add(Normalize(name));
+                    var rawStem = Path.GetFileNameWithoutExtension(name);
+                    var parts = rawStem.Split('-', StringSplitOptions.RemoveEmptyEntries);
+                    for (var i = 1; i <= parts.Length; i++)
+                    {
+                        var prefix = Normalize(string.Join("-", parts.Take(i)));
+                        if (prefix.Length >= 4) installed.FileNames.Add(prefix);
+                    }
                     foreach (var id in ReadModIds(path))
                     {
                         installed.Ids.Add(id);

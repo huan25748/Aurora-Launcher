@@ -114,7 +114,12 @@ namespace AuroraLauncher
             var text = await response.Content.ReadAsStringAsync();
             var json = JsonNode.Parse(text) as JsonObject ?? new JsonObject();
             if (!response.IsSuccessStatusCode) throw new Exception(json["error_description"]?.GetValue<string>() ?? "微软令牌刷新失败");
-            return await LoginMinecraft(json["access_token"]?.GetValue<string>() ?? throw new Exception("缺少 access_token"), json["refresh_token"]?.GetValue<string>() ?? refreshToken);
+            var refreshed = await LoginMinecraft(json["access_token"]?.GetValue<string>() ?? throw new Exception("缺少 access_token"), json["refresh_token"]?.GetValue<string>() ?? refreshToken);
+            // 刷新只更新令牌，不能替换账户 id/uuid/用户名。
+            refreshed["id"] = account["id"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(refreshed["uuid"]?.GetValue<string>())) refreshed["uuid"] = account["uuid"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(refreshed["username"]?.GetValue<string>())) refreshed["username"] = account["username"]?.GetValue<string>() ?? "";
+            return refreshed;
         }
 
         private static async Task<JsonObject> LoginMinecraft(string microsoftToken, string refreshToken)

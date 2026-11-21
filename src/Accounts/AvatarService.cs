@@ -79,6 +79,24 @@ namespace AuroraLauncher
                 var hat = frame.PixelHeight >= 64 * scale
                     ? ReadPixels(new CroppedBitmap(frame, new Int32Rect(40 * scale, 8 * scale, 8 * scale, 8 * scale)))
                     : null;
+                // 与 PCL MySkin.Load 相同的帽子层判断：只有存在透明像素，
+                // 或帽子取样点与脸不同，才绘制帽子层。
+                if (hat != null)
+                {
+                    var full = ReadPixels(frame);
+                    var width = frame.PixelWidth;
+                    var height = frame.PixelHeight;
+                    byte Alpha(int x, int y) => full[(y * width + x) * 4 + 3];
+                    var transparent = Alpha(1, 1) == 0
+                        || Alpha(width - 1, height - 1) == 0
+                        || Alpha(width - 2, (int)Math.Round(height / 2d - 2d)) == 0;
+                    var hatX = scale * 41;
+                    var hatY = scale * 9;
+                    var different = full[(1 * width + 1) * 4] != full[(hatY * width + hatX) * 4]
+                        && full[((height - 1) * width + width - 1) * 4] != full[(hatY * width + hatX) * 4]
+                        && full[(((int)Math.Round(height / 2d - 2d)) * width + width - 2) * 4] != full[(hatY * width + hatX) * 4];
+                    if (!transparent && !different) hat = null;
+                }
                 // PCL's MySkin: 56px canvas, face 48px at (4,4), hat stretched
                 // over the whole canvas, all with nearest-neighbor sampling.
                 const int canvas = 56;

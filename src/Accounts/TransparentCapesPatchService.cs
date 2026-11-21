@@ -38,6 +38,12 @@ namespace AuroraLauncher
                     catch { }
                     return;
                 }
+                var type = account["type"]?.GetValue<string>() ?? "";
+                if (type == "microsoft")
+                {
+                    // 正版账户完全交给游戏/CSL 自身处理，启动器不再写入任何皮肤配置。
+                    return;
+                }
                 PrepareLocalFiles(gameDir, account);
                 WriteConfig(gameDir, account);
             }
@@ -127,6 +133,51 @@ namespace AuroraLauncher
             catch { }
         }
 
+        private static void RepairMojangSource(string gameDir)
+        {
+            var dir = Path.Combine(gameDir, "CustomSkinLoader");
+            var file = Path.Combine(dir, "CustomSkinLoader.json");
+            try
+            {
+                JsonObject? config = null;
+                if (File.Exists(file))
+                    config = JsonNode.Parse(File.ReadAllText(file)) as JsonObject;
+                if (config == null)
+                {
+                    config = new JsonObject
+                    {
+                        ["version"] = "15.0.1",
+                        ["buildNumber"] = 0,
+                        ["loadlist"] = new JsonArray()
+                    };
+                }
+                var list = config["loadlist"] as JsonArray;
+                if (list == null)
+                {
+                    list = new JsonArray();
+                    config["loadlist"] = list;
+                }
+                JsonObject? mojang = null;
+                foreach (var item in list.OfType<JsonObject>())
+                    if (string.Equals(item["type"]?.GetValue<string>(), "MojangAPI", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mojang = item;
+                        break;
+                    }
+                if (mojang == null)
+                {
+                    mojang = new JsonObject { ["name"] = "Mojang", ["type"] = "MojangAPI" };
+                    list.Insert(0, mojang);
+                }
+                mojang["apiRoot"] = "https://api.mojang.com/";
+                mojang["sessionRoot"] = "https://sessionserver.mojang.com/";
+                config["auroraManaged"] = true;
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(file, config.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch { }
+        }
+
         private static void PrepareLocalFiles(string gameDir, JsonObject account)
         {
             var id = account["id"]?.GetValue<string>() ?? "";
@@ -140,7 +191,7 @@ namespace AuroraLauncher
             var localSkin = AccountSkinService.SkinPath(id);
             var mode = account["skinMode"]?.GetValue<string>() ?? "";
             var targetSkin = Path.Combine(skins, user + ".png");
-            if (mode is "random" or "steve" or "alex" or "custom" or "premium" && File.Exists(localSkin))
+            if (File.Exists(localSkin))
                 File.Copy(localSkin, targetSkin, true);
             else if (File.Exists(targetSkin))
                 File.Delete(targetSkin);
@@ -154,6 +205,7 @@ namespace AuroraLauncher
             Directory.CreateDirectory(dir);
             var id = account["id"]?.GetValue<string>() ?? "";
             var mode = account["skinMode"]?.GetValue<string>() ?? "";
+            var user = account["username"]?.GetValue<string>() ?? "";
             var type = account["type"]?.GetValue<string>() ?? "offline";
             var authServer = (account["authServer"]?.GetValue<string>() ?? "").Trim().TrimEnd('/');
             if (authServer.Contains("littleskin.cn", StringComparison.OrdinalIgnoreCase)
@@ -161,7 +213,8 @@ namespace AuroraLauncher
                 authServer += "/api/yggdrasil";
 
             var list = new JsonArray();
-            if (mode is "random" or "steve" or "alex" or "custom" or "premium")
+            var localSkinFile = Path.Combine(gameDir, "CustomSkinLoader", "LocalSkin", "skins", user + ".png");
+            if (File.Exists(localSkinFile))
             {
                 list.Add(new JsonObject
                 {
@@ -179,7 +232,27 @@ namespace AuroraLauncher
             }
             else
             {
-                list.Add(new JsonObject { ["name"] = "Mojang", ["type"] = "MojangAPI" });
+                if (type == "offline")
+                {
+                    // HMCL 的离线皮肤用 LittleSkin 时，其他同样使用 LittleSkin 的玩家能看到皮肤；
+                    // 这里按用户名向 LittleSkin 的 CustomSkinAPI 查询，补上多人联机时其他玩家的皮肤。
+                    list.Add(new JsonObject
+                    {
+                        ["name"] = "LittleSkin",
+                        ["type"] = "CustomSkinAPI",
+                        ["root"] = "https://littleskin.cn/csl/"
+                    });
+                }
+                list.Add(new JsonObject
+                {
+                    ["name"] = "Mojang",
+                    ["type"] = "MojangAPI",
+                    ["apiRoot"] = "https://api.mojang.com/",
+                    ["sessionRoot"] = "https://sessionserver.mojang.com/"
+                });
+                list.Add(new JsonObject { ["name"] = "BlessingSkin", ["type"] = "CustomSkinAPI", ["root"] = "https://skin.prinzeugen.net/" });
+                list.Add(new JsonObject { ["name"] = "ElyBy", ["type"] = "ElyByAPI", ["root"] = "http://skinsystem.ely.by/textures/" });
+                list.Add(new JsonObject { ["name"] = "SkinMe", ["type"] = "UniSkinAPI", ["root"] = "http://www.skinme.cc/uniskin/" });
             }
 
             var config = new JsonObject

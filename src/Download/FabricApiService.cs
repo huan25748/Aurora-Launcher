@@ -39,6 +39,7 @@ namespace AuroraLauncher
                         ["name"] = version["name"]?.GetValue<string>() ?? version["version_number"]?.GetValue<string>() ?? "",
                         ["downloadUrl"] = file["url"]?.GetValue<string>() ?? "",
                         ["fileName"] = fileName,
+                        ["date"] = version["date_published"]?.GetValue<string>() ?? "",
                         ["size"] = file["size"]?.GetValue<long>() ?? 0
                     };
                     result.Add(entry);
@@ -69,12 +70,15 @@ namespace AuroraLauncher
                         ["name"] = file["displayName"]?.GetValue<string>() ?? fileName,
                         ["downloadUrl"] = file["downloadUrl"]?.GetValue<string>() ?? "",
                         ["fileName"] = fileName,
+                        ["date"] = file["fileDate"]?.GetValue<string>() ?? "",
                         ["size"] = file["fileLength"]?.GetValue<long>() ?? 0
                     });
                 }
             }
             catch { }
-            return result;
+            return new JsonArray(result.OfType<JsonObject>()
+                .OrderByDescending(item => DateTimeOffset.TryParse(item["date"]?.GetValue<string>(), out var date) ? date : DateTimeOffset.MinValue)
+                .Select(item => JsonNode.Parse(item.ToJsonString())).ToArray());
         }
 
         private static bool MatchesMc(JsonObject file, string mcVersion)

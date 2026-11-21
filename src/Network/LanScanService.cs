@@ -17,7 +17,18 @@ namespace AuroraLauncher
                 var state = LaunchService.State();
                 var pid = state["pid"]?.GetValue<int>() ?? 0;
                 if (pid <= 0)
-                    return new JsonObject { ["ok"] = false, ["error"] = "游戏尚未运行，请先进入世界并点击“对局域网开放”" };
+                {
+                    // 启动器重启后内存里的 pid 会丢失，退回到系统中正在运行的 Java 进程。
+                    var javaPids = new List<int>();
+                    foreach (var name in new[] { "java", "javaw" })
+                        foreach (var process in Process.GetProcessesByName(name))
+                            try { javaPids.Add(process.Id); } catch { }
+                    var total = new List<int>();
+                    foreach (var candidate in javaPids) total.AddRange(ListeningPorts(candidate));
+                    if (total.Count == 0)
+                        return new JsonObject { ["ok"] = false, ["error"] = "游戏尚未运行，请先进入世界并点击“对局域网开放”" };
+                    pid = javaPids.FirstOrDefault(candidate => ListeningPorts(candidate).Count > 0);
+                }
                 var ip = VirtualIp();
                 var ports = ListeningPorts(pid);
                 if (ports.Count == 0)

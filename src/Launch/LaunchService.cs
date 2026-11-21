@@ -288,9 +288,21 @@ namespace AuroraLauncher
 
                 ProgressService.Update(1, "实例信息已读取");
                 var account = AccountService.Active() as JsonObject ?? throw new Exception("请先添加一个账户");
+                if (account["type"]?.GetValue<string>() == "microsoft")
+                {
+                    var currentToken = account["accessToken"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrWhiteSpace(currentToken) || currentToken == "0")
+                    {
+                        try { account = await MicrosoftAuthService.Refresh(account); }
+                        catch (Exception ex) { throw new Exception("微软令牌无效，请重新登录账户：" + ex.Message); }
+                    }
+                }
                 var username = account["username"]?.GetValue<string>() ?? "Player";
                 var uuid = account["uuid"]?.GetValue<string>() ?? "";
                 var accessToken = account["accessToken"]?.GetValue<string>() ?? "0";
+                if (account["type"]?.GetValue<string>() == "microsoft" && (string.IsNullOrWhiteSpace(accessToken) || accessToken == "0"))
+                    throw new Exception("微软账户没有有效的 accessToken，请重新登录账户");
+                if (string.IsNullOrWhiteSpace(uuid)) throw new Exception("账户缺少 UUID，请重新登录或重新添加该账户");
 
                 var gameDir = instance["gameDir"]?.GetValue<string>() ?? Path.Combine(AppPaths.RootDir, "versions", versionId);
                 Directory.CreateDirectory(gameDir);
@@ -357,7 +369,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "2.3.1",
+                    ["${launcher_version}"] = "2.4.0",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -389,7 +401,7 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.3.1");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.4.0");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
@@ -437,7 +449,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=2.3.1");
+                args.Add("-Dminecraft.launcher.version=2.4.0");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
@@ -479,6 +491,11 @@ namespace AuroraLauncher
                 }
                 foreach (var raw in gameArgs)
                     args.Add(Replace(raw, replacements));
+                if (!args.Any(item => string.Equals(item, "--userProperties", StringComparison.Ordinal)))
+                {
+                    args.Add("--userProperties");
+                    args.Add("{}");
+                }
 
                 var width = options["width"]?.GetValue<int>() ?? instance["width"]?.GetValue<int>() ?? 854;
                 var height = options["height"]?.GetValue<int>() ?? instance["height"]?.GetValue<int>() ?? 480;

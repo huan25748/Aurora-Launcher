@@ -93,6 +93,10 @@ namespace AuroraLauncher
             lock (Gate)
             {
                 try { running = _process != null && !_process.HasExited; } catch { }
+                if (!running)
+                {
+                    try { running = System.Diagnostics.Process.GetProcessesByName("easytier-core").Length > 0; } catch { }
+                }
             }
             return new JsonObject
             {

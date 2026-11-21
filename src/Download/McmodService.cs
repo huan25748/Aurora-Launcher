@@ -21,20 +21,58 @@ namespace AuroraLauncher
             return client;
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> EnglishCache = new(StringComparer.OrdinalIgnoreCase);
+
         public static async Task<string> English(string query)
         {
-            var url = await Search(query);
-            if (string.IsNullOrWhiteSpace(url)) return "";
+            if (string.IsNullOrWhiteSpace(query)) return "";
+            var key = query.Trim();
+            if (EnglishCache.TryGetValue(key, out var cached)) return cached;
+            var result = await ResolveEnglishFromSearch(key);
+            if (string.IsNullOrWhiteSpace(result))
+                result = ModNamesService.English(key) ?? "";
+            if (!string.IsNullOrWhiteSpace(result))
+            {
+                EnglishCache[key] = result;
+                ModNamesService.RememberChinese(key, result);
+            }
+            return result;
+        }
+
+        private static async Task<string> ResolveEnglishFromSearch(string query)
+        {
             try
             {
-                var html = await Http.GetStringAsync(url);
-                var match = System.Text.RegularExpressions.Regex.Match(html, "<title>[^<]*?\\(([^()]+)\\)\\s*-\\s*MC百科");
-                if (!match.Success) return "";
-                var name = System.Text.RegularExpressions.Regex.Replace(match.Groups[1].Value, "^\\[.*?\\]\\s*", "").Trim();
-                return name;
+                var html = await Http.GetStringAsync("https://search.mcmod.cn/s?key=" + Uri.EscapeDataString(query));
+                var normalizedQuery = NormalizeName(query);
+                var best = "";
+                var bestScore = -1;
+                foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                    html, "<a[^>]*href=\"(?:https?:)?//www\\.mcmod\\.cn/class/\\d+\\.html\"[^>]*>(.*?)</a>",
+                    System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                {
+                    var title = System.Net.WebUtility.HtmlDecode(
+                        System.Text.RegularExpressions.Regex.Replace(match.Groups[1].Value, "<[^>]+>", " "));
+                    title = System.Text.RegularExpressions.Regex.Replace(title, "\\s+", " ").Trim();
+                    if (title.Length < 2) continue;
+                    var normalizedTitle = NormalizeName(title);
+                    var score = -1;
+                    if (normalizedTitle.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)) score = 1000 + normalizedQuery.Length;
+                    else if (normalizedQuery.Contains(normalizedTitle, StringComparison.OrdinalIgnoreCase)) score = 500 + normalizedTitle.Length;
+                    if (score > bestScore) { bestScore = score; best = title; }
+                }
+                if (bestScore < 0 || string.IsNullOrWhiteSpace(best)) return "";
+                var bracket = System.Text.RegularExpressions.Regex.Match(best, "\\(([^()]+)\\)");
+                if (bracket.Success)
+                    return System.Text.RegularExpressions.Regex.Replace(bracket.Groups[1].Value, "^\\[.*?\\]\\s*", "").Trim();
+                // 没有括号英文名时，若标题本身是英文则直接使用。
+                return System.Text.RegularExpressions.Regex.IsMatch(best, "[A-Za-z]") ? best : "";
             }
             catch { return ""; }
         }
+
+        private static string NormalizeName(string value)
+            => System.Text.RegularExpressions.Regex.Replace(value ?? "", "[^\\p{L}\\p{N}]+", "").ToLowerInvariant();
 
         public static async Task<string> Search(string query, string? alternative = null)
         {

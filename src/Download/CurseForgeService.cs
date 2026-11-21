@@ -81,7 +81,24 @@ namespace AuroraLauncher
             var limit = Math.Clamp(GetInt(input, "limit", 20), 1, 50);
             var sort = GetString(input, "sort") ?? "downloads";
             var sortField = sort switch { "newest" => 10, "updated" => 3, "relevance" => 2, _ => 6 };
-            var search = GetString(input, "query");
+            var originalSearch = GetString(input, "query");
+            var search = originalSearch;
+            if (!string.IsNullOrWhiteSpace(search) && System.Text.RegularExpressions.Regex.IsMatch(search!, "[\u4e00-\u9fff]"))
+            {
+                // 先用本地中文名表反查 slug，例如 输入法冲突修复 → imblocker，
+                // 这比在线翻译更稳定，也能保留原名里的关键词。
+                var slug = ModNamesService.Slug("curseforge", search!);
+                if (!string.IsNullOrWhiteSpace(slug)) search = slug;
+                else
+                {
+                    try
+                    {
+                        var english = await McmodService.English(search!);
+                        if (!string.IsNullOrWhiteSpace(english)) search = english;
+                    }
+                    catch { }
+                }
+            }
             // CurseForge 对 1-2 个字符的搜索会返回全量热门结果（单个响应可达 500 KB、20 秒），
             // 这里减少短关键词的 pageSize，保证能出结果且不会等到超时。
             if (!string.IsNullOrWhiteSpace(search) && search!.Trim().Length < 3)
@@ -96,7 +113,8 @@ namespace AuroraLauncher
             var loaderId = loader switch { "forge" => 1, "fabric" => 4, "quilt" => 5, "neoforge" => 6, _ => 0 };
             if (loaderId > 0) query.Add("modLoaderType=" + loaderId);
             var cacheKey = string.Join("&", query);
-            if (SearchCache.TryGetValue(cacheKey, out var cached) && cached.At > DateTime.UtcNow.AddMinutes(-2))
+            var cacheable = string.IsNullOrWhiteSpace(search);
+            if (cacheable && SearchCache.TryGetValue(cacheKey, out var cached) && cached.At > DateTime.UtcNow.AddMinutes(-2))
                 return JsonNode.Parse(cached.Json) as JsonObject ?? new JsonObject();
             var raw = await Get("/mods/search?" + string.Join("&", query)) as JsonObject ?? new JsonObject();
             var hits = new JsonArray();
@@ -107,6 +125,25 @@ namespace AuroraLauncher
                     if (entry is JsonObject mod) { var hit = MapHit(mod); hit["nameTranslation"] = ModNamesService.Chinese("curseforge", hit["slug"]?.GetValue<string>()); hits.Add(hit); }
                 }
             }
+            if (hits.Count == 0 && !string.IsNullOrWhiteSpace(originalSearch) && !string.Equals(originalSearch, search, StringComparison.Ordinal))
+            {
+                try
+                {
+                    var retry = query.Where(item => !item.StartsWith("searchFilter=", StringComparison.Ordinal)).ToList();
+                    retry.Add("searchFilter=" + Uri.EscapeDataString(originalSearch!));
+                    var rawRetry = await Get("/mods/search?" + string.Join("&", retry)) as JsonObject;
+                    if (rawRetry?["data"] is JsonArray retryData)
+                        foreach (var entry in retryData)
+                            if (entry is JsonObject mod)
+                            {
+                                var hit = MapHit(mod);
+                                hit["nameTranslation"] = ModNamesService.Chinese("curseforge", hit["slug"]?.GetValue<string>());
+                                hits.Add(hit);
+                            }
+                    raw = rawRetry ?? raw;
+                }
+                catch { }
+            }
             var result = new JsonObject
             {
                 ["hits"] = hits,
@@ -114,7 +151,7 @@ namespace AuroraLauncher
                 ["offset"] = offset,
                 ["limit"] = limit
             };
-            try { SearchCache[cacheKey] = (DateTime.UtcNow, result.ToJsonString()); } catch { }
+            if (cacheable) try { SearchCache[cacheKey] = (DateTime.UtcNow, result.ToJsonString()); } catch { }
             return result;
         }
 
