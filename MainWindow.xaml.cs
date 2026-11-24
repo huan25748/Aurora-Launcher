@@ -56,10 +56,25 @@ namespace AuroraLauncher
                 }
                 catch { }
                 var assets = AssetBundle.Ensure();
-                var dataDir = Path.Combine(AppContext.BaseDirectory, ".webview2");
+                var dataDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "AuroraLauncher", "WebView2");
                 Directory.CreateDirectory(dataDir);
-                var environment = await CoreWebView2Environment.CreateAsync(null, dataDir);
-                await Browser.EnsureCoreWebView2Async(environment);
+                CoreWebView2Environment environment;
+                try
+                {
+                    environment = await CoreWebView2Environment.CreateAsync(null, dataDir);
+                    await Browser.EnsureCoreWebView2Async(environment);
+                }
+                catch (Exception first)
+                {
+                    // 偶发 0x80070003：WebView2 用户数据目录还没就绪。
+                    // 等一会重建目录再试一次，避免用户必须重开启动器。
+                    await Task.Delay(800);
+                    Directory.CreateDirectory(dataDir);
+                    environment = await CoreWebView2Environment.CreateAsync(null, dataDir);
+                    await Browser.EnsureCoreWebView2Async(environment);
+                }
 
                 SizeChanged += (_, _) => ApplyRoundedRegion();
                 StateChanged += (_, _) => ApplyRoundedRegion();
