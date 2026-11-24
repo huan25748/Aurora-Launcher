@@ -202,14 +202,14 @@
 
   <section class="hero">
     <div>
-      <span class="pill"><span class="dot"></span> 2.4.0 正式版 · Windows x64</span>
+      <span class="pill"><span class="dot"></span> 2.4.1 正式版 · Windows x64</span>
       <h1>一个完整的<br><span class="grad">Minecraft 启动器</span></h1>
       <p class="lead">
         Aurora Launcher 使用 .NET 6 + WPF + WebView2 重写，安装、下载、账户、联机与实例管理都在原生后端完成。
         支持原版与 Fabric / Quilt / Forge / NeoForge / OptiFine，内置 Modrinth 与 CurseForge 内容管理。
       </p>
       <div class="hero-actions">
-        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/download/2.4.0/AuroraLauncher.exe" target="_blank" rel="noopener">
+        <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/download/2.4.1/AuroraLauncher.exe" target="_blank" rel="noopener">
           下载最新版
         </a>
         <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">
@@ -351,7 +351,7 @@
         <p style="color:var(--soft);margin:0">
           最新版发布在 Gitee Releases，历史版本全部保留，可随时回退。
         </p>
-        <div class="ver">当前版本 <b>2.4.0</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
+        <div class="ver">当前版本 <b>2.4.1</b> · Windows x64 · 约 3.1 MB · 框架依赖单文件</div>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://gitee.com/mobai-33460/aurora-launcher/releases/latest" target="_blank" rel="noopener">前往 Gitee 下载最新版</a>
           <a class="btn btn-ghost" href="https://gitee.com/mobai-33460/aurora-launcher/releases" target="_blank" rel="noopener">历史版本</a>
@@ -388,27 +388,36 @@
   <section id="changelog">
     <div class="head">
       <div class="eyebrow">CHANGELOG</div>
-      <h2>2.4.0 更新日志</h2>
-      <p>本次更新集中在正版启动参数、皮肤显示与联机可用性。</p>
+      <h2>2.4.1 更新日志</h2>
+      <p>整合包导出对齐 PCL，修复联机页、进度条与崩溃分析。</p>
     </div>
     <div class="card">
-      <h3>正版启动</h3>
+      <h3>整合包导出</h3>
       <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
-        <li>启动前检查 Microsoft accessToken：为空或为 <code>0</code> 时自动刷新，刷新失败则停止启动并提示重新登录，不再带着占位令牌进入游戏。</li>
-        <li>令牌刷新只更新 accessToken / refreshToken，保留账户 id、uuid、用户名，避免账户身份被替换。</li>
-        <li>启动参数补齐 <code>--userProperties {}</code>，与 HMCL 保持一致；UUID 使用紧凑格式。</li>
-        <li>账户 UUID 为空时直接提示，不再把空 UUID 传给游戏导致参数解析崩溃。</li>
-      </ul>
-      <h3>皮肤</h3>
-      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
-        <li>头像按 PCL 规则合成：56×56 画布、脸 48×48、帽子层按透明度和颜色判断是否绘制。</li>
-        <li>修复头像外层多余 padding 导致的缩小和偏移。</li>
-        <li>正版账户不再写入或覆盖 CustomSkinLoader 配置，交给游戏自行加载皮肤。</li>
+        <li>导出按 PCL 白名单复制：mods、config、journeymap/config、journeymap/server、resourcepacks、shaderpacks 等。</li>
+        <li>光影包和模组一样写入 modrinth.index.json 下载清单，不再原样打包。</li>
+        <li>每个文件写入 mediafilez、edge、Modrinth 多条下载链接。</li>
+        <li>CurseForge 指纹解析改用文件 SHA1 匹配，修复模组残留 overrides 的问题。</li>
+        <li>导出文件名不再附加日期；「打开」按钮可直接打开默认导出目录。</li>
+        <li>导出弹窗改为全自绘控件，格式、包含内容、路径分区展示。</li>
       </ul>
       <h3>联机</h3>
       <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
-        <li>EasyTier 状态识别系统中已存在的 easytier-core 进程，启动器重启后不再误报未连接。</li>
-        <li>局域网端口扫描在启动器丢失游戏 PID 时，自动回退到系统中的 java / javaw 进程。</li>
+        <li>移除 EasyTier，只保留陶瓦联机。</li>
+        <li>修复重复点击联机后页面空白、陶瓦面板被 React 销毁的问题。</li>
+      </ul>
+      <h3>启动与稳定性</h3>
+      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
+        <li>微软登录、CurseForge 指纹、游戏请求统一走 IPv4，修复 IPv6 超时导致的登录失败和无皮肤。</li>
+        <li>游戏启动参数补充 --userProperties，正版令牌为空时刷新并阻止以 0 令牌启动。</li>
+        <li>Forge 无预下载依赖时进度直接 100%，不再停在 0% 闪烁。</li>
+        <li>WebView2 数据目录改到 LocalAppData，初始化失败自动重试一次。</li>
+        <li>崩溃弹窗与「上次崩溃分析」共用同一份缓存结果。</li>
+      </ul>
+      <h3>搜索与版本</h3>
+      <ul style="margin:8px 0 18px;padding-left:20px;list-style:disc;color:var(--muted);line-height:1.8">
+        <li>MC百科链接按标题精确匹配，修复 Unbound 指向植物魔法的问题。</li>
+        <li>Forge / NeoForge 版本按数值从新到旧排序。</li>
       </ul>
     </div>
   </section>
