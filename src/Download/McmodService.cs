@@ -133,10 +133,31 @@ namespace AuroraLauncher
             try
             {
                 var html = await Http.GetStringAsync("https://search.mcmod.cn/s?key=" + Uri.EscapeDataString(query));
-                var match = Regex.Match(html, "/class/(\\d+)\\.html");
-                var url = match.Success ? "https://www.mcmod.cn/class/" + match.Groups[1].Value + ".html" : "";
-                Cache[query] = (DateTime.UtcNow, url);
-                return url;
+                var normalizedQuery = NormalizeName(query);
+                var bestUrl = "";
+                var bestScore = -1;
+                var firstUrl = "";
+                foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                    html, "<a[^>]*href=\"(?:https?:)?//www\\.mcmod\\.cn/class/(\\d+)\\.html\"[^>]*>(.*?)</a>",
+                    System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                {
+                    var url = "https://www.mcmod.cn/class/" + match.Groups[1].Value + ".html";
+                    if (firstUrl.Length == 0) firstUrl = url;
+                    var title = System.Net.WebUtility.HtmlDecode(
+                        System.Text.RegularExpressions.Regex.Replace(match.Groups[2].Value, "<[^>]+>", " "));
+                    title = System.Text.RegularExpressions.Regex.Replace(title, "\\s+", " ").Trim();
+                    var normalizedTitle = NormalizeName(title);
+                    if (normalizedTitle.Length == 0) continue;
+                    var score = -1;
+                    if (normalizedTitle == normalizedQuery) score = 10000;
+                    else if (normalizedTitle.StartsWith(normalizedQuery, StringComparison.OrdinalIgnoreCase)) score = 5000 - normalizedTitle.Length;
+                    else if (normalizedTitle.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)) score = 1000 - normalizedTitle.Length;
+                    else if (normalizedQuery.Contains(normalizedTitle, StringComparison.OrdinalIgnoreCase)) score = 500 - normalizedTitle.Length;
+                    if (score > bestScore) { bestScore = score; bestUrl = url; }
+                }
+                var result = bestScore > 0 ? bestUrl : firstUrl;
+                Cache[query] = (DateTime.UtcNow, result);
+                return result;
             }
             catch
             {
@@ -144,5 +165,6 @@ namespace AuroraLauncher
                 return "";
             }
         }
+
     }
 }

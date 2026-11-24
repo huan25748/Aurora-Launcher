@@ -79,14 +79,21 @@ namespace AuroraLauncher
             return array;
         }
 
-        private static readonly HttpClient ExportHttp = new() { Timeout = TimeSpan.FromSeconds(60) };
+        private static readonly HttpClient ExportHttp = CreateExportHttp();
+
+        private static HttpClient CreateExportHttp()
+        {
+            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("AuroraLauncher/2.5.0");
+            return client;
+        }
 
         private static bool IsExportCandidate(string path)
         {
             var ext = Path.GetExtension(path).ToLowerInvariant();
             if (ext != ".zip" && ext != ".rar" && ext != ".jar" && ext != ".disabled" && ext != ".old") return false;
             var lower = path.Replace('\\', '/').ToLowerInvariant();
-            return lower.Contains("/mods/") || lower.Contains("/packs/") || lower.Contains("/openloader/") || lower.Contains("/resource");
+            return lower.Contains("/mods/") || lower.Contains("/packs/") || lower.Contains("/openloader/") || lower.Contains("/resource") || lower.Contains("/shaderpacks/") || lower.Contains("/resourcepacks/");
         }
 
         private static uint Murmur2(byte[] data)
@@ -119,11 +126,34 @@ namespace AuroraLauncher
             foreach (var dir in Directory.EnumerateDirectories(from))
             {
                 var name = Path.GetFileName(dir);
-                if (root && new[] { "assets", "versions", "libraries", "structureCacheV1", ".fabric", ".git", "avatar-cache", "cosmetic-cache" }.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+                if (root)
+                {
+                    // 完全按 PCL 的导出白名单复制。
+                    var allowed = new[] { "mods", "coremods", "lib", "addons", "multiblocked", "modpack-update-checker", "global_packs", "global_resource_packs", "global_data_packs", "optional_data_packs", "maps", "mods-resourcepacks", "matmos", "resource_assorts", "patchouli_books", "openloader", "worldshape", "resources", "scripts", "structures", "fontfiles", "oresources", "packmenu", "craftpresence", "pointblanks", "config", "CustomSkinLoader", "PCL", "resourcepacks", "texturepacks", "shaderpacks" };
+                    if (name.Equals("journeymap", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var sub in new[] { "config", "server" })
+                        {
+                            var source = Path.Combine(from, sub);
+                            if (Directory.Exists(source)) CopyTree(source, Path.Combine(to, sub), false);
+                        }
+                        continue;
+                    }
+                    if (!allowed.Contains(name, StringComparer.OrdinalIgnoreCase) && !name.StartsWith("kubejs", StringComparison.OrdinalIgnoreCase) && !name.StartsWith("template", StringComparison.OrdinalIgnoreCase)) continue;
+                }
+                if (root && (name.EndsWith("-natives", StringComparison.OrdinalIgnoreCase) || name.StartsWith("natives-", StringComparison.OrdinalIgnoreCase))) continue;
                 CopyTree(dir, Path.Combine(to, name), false);
             }
             foreach (var file in Directory.EnumerateFiles(from))
-                File.Copy(file, Path.Combine(to, Path.GetFileName(file)), true);
+            {
+                var fileName = Path.GetFileName(file);
+                if (root)
+                {
+                    var keep = new[] { "options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat", "icon.png" };
+                    if (!keep.Contains(fileName, StringComparer.OrdinalIgnoreCase)) continue;
+                }
+                File.Copy(file, Path.Combine(to, fileName), true);
+            }
         }
 
         public static async Task<JsonObject> ExportPack(string id, JsonObject? options = null)
@@ -139,13 +169,81 @@ namespace AuroraLauncher
             var outputDir = options?["outputDir"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(outputDir)) outputDir = Path.Combine(AppPaths.SettingsDir, "packs");
             Directory.CreateDirectory(outputDir);
-            var target = Path.Combine(outputDir, SafeName(name!) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "." + extension);
+            var target = Path.Combine(outputDir, SafeName(name!) + "." + extension);
             var temp = Path.Combine(Path.GetTempPath(), "aurora-export-" + Guid.NewGuid().ToString("N")[..8]);
             var packDir = Path.Combine(temp, "modpack");
             var overrides = Path.Combine(packDir, "overrides");
             try
             {
                 CopyTree(gameDir, overrides, true);
+                // 明确按 PCL 的规则复制旅行地图配置，避免白名单分支漏掉。
+                foreach (var sub in new[] { "config", "server" })
+                {
+                    var source = Path.Combine(gameDir, "journeymap", sub);
+                    if (Directory.Exists(source)) CopyTree(source, Path.Combine(overrides, "journeymap", sub), false);
+                }
+                // PCL 的排除规则。
+                foreach (var file in Directory.EnumerateFiles(Path.Combine(overrides, "mods"), "*", SearchOption.TopDirectoryOnly))
+                    if (file.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".old", StringComparison.OrdinalIgnoreCase))
+                        try { File.Delete(file); } catch { }
+                Remove("mods/.connector");
+                Remove("mods/mcef-libraries");
+                Remove("mods/mcef-cache");
+                Remove("config/accountsx");
+                Remove("config/jei/world");
+                void KeepOnly(string relative, string keep)
+                {
+                    var dir = Path.Combine(overrides, relative);
+                    if (!Directory.Exists(dir)) return;
+                    foreach (var file in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                        if (!string.Equals(Path.GetFileName(file), keep, StringComparison.OrdinalIgnoreCase))
+                            try { File.Delete(file); } catch { }
+                }
+                KeepOnly("config/worldedit", "worldedit.properties");
+                KeepOnly("config/spark", "config.json");
+                foreach (var dir in Directory.EnumerateDirectories(overrides, "kubejs*", SearchOption.TopDirectoryOnly))
+                {
+                    Remove(Path.GetRelativePath(overrides, Path.Combine(dir, "probe")));
+                    Remove(Path.GetRelativePath(overrides, Path.Combine(dir, "exported")));
+                    try { File.Delete(Path.Combine(dir, "jsconfig.json")); } catch { }
+                    try { File.Delete(Path.Combine(dir, "README.txt")); } catch { }
+                }
+                bool Include(string key, bool fallback) =>
+                    options?[key] is JsonValue value && value.TryGetValue<bool>(out var flag) ? flag : fallback;
+                void Remove(string relative)
+                {
+                    try
+                    {
+                        var path = Path.Combine(overrides, relative);
+                        if (Directory.Exists(path)) Directory.Delete(path, true);
+                        else if (File.Exists(path)) File.Delete(path);
+                    }
+                    catch { }
+                }
+                if (!Include("includeMods", true)) Remove("mods");
+                if (!Include("includeResourcePacks", true)) Remove("resourcepacks");
+                if (!Include("includeShaderPacks", true)) Remove("shaderpacks");
+                if (!Include("includeSaves", true)) Remove("saves");
+                if (!Include("includeScreenshots", false)) Remove("screenshots");
+                if (!Include("includeConfig", true)) Remove("config");
+                if (!Include("includeSaves", true)) Remove("saves");
+                if (!Include("includeResourcePacks", true)) Remove("resourcepacks");
+                if (!Include("includeShaderPacks", true)) Remove("shaderpacks");
+                if (!Include("includeScreenshots", false)) Remove("screenshots");
+                // PCL 默认导出 journeymap/config 与 journeymap/server，地图数据需单独勾选。
+                if (!Include("includeMapData", false)) { Remove("journeymap/data"); Remove("xaero"); Remove("XaeroWaypoints"); Remove("XaeroWorldMap"); }
+                Remove("journeymap/logs");
+                if (!Include("includeLogs", false)) { Remove("logs"); Remove("crash-reports"); }
+                if (!Include("includeServers", true)) Remove("servers.dat");
+                if (!Include("includeOptions", true)) { Remove("options.txt"); Remove("optionsof.txt"); }
+                try
+                {
+                    // 只保留 PCL 导出会带的根目录文件。
+                    var keepRoot = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "options.txt", "optionsof.txt", "servers.dat" };
+                    foreach (var file in Directory.GetFiles(overrides, "*", SearchOption.TopDirectoryOnly))
+                        if (!keepRoot.Contains(Path.GetFileName(file))) File.Delete(file);
+                }
+                catch { }
                 // Resolve downloads exactly like PCL: hash every jar/zip and ask
                 // Modrinth + CurseForge; resolved files leave overrides.
                 var downloads = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -182,24 +280,30 @@ namespace AuroraLauncher
                 try
                 {
                     var body = JsonSerializer.Serialize(new { fingerprints = cfHashes.Keys.ToArray() });
-                    using var response = await ExportHttp.PostAsync("https://mod.mcimirror.top/curseforge/v1/fingerprints/432",
+                    using var response = await HttpFactory.Client.PostAsync("https://mod.mcimirror.top/curseforge/v1/fingerprints/432",
                         new StringContent(body, Encoding.UTF8, "application/json"));
                     var text = await response.Content.ReadAsStringAsync();
-                    if (JsonNode.Parse(text) is JsonObject cf && cf["data"]?["exactMatches"] is JsonArray matches)
+                    var parsed = JsonNode.Parse(text);
+                    try { var logDir = Path.Combine(AppPaths.SettingsDir, "logs"); Directory.CreateDirectory(logDir); File.AppendAllText(Path.Combine(logDir, "export.log"), DateTime.Now.ToString("HH:mm:ss") + " cf fingerprints=" + cfHashes.Count + " response=" + text[..Math.Min(200, text.Length)] + Environment.NewLine); } catch { }
+                    if (parsed is JsonObject cf && cf["data"]?["exactMatches"] is JsonArray matches)
                     {
                         foreach (var item in matches.OfType<JsonObject>())
                         {
-                            var fingerprint = item["file"]?["fileFingerprint"]?.GetValue<uint>() ?? 0;
                             var url = item["file"]?["downloadUrl"]?.GetValue<string>();
-                            if (fingerprint == 0 || string.IsNullOrWhiteSpace(url) || !cfHashes.TryGetValue(fingerprint, out var rel)) continue;
-                            var sha1 = hashes.FirstOrDefault(kv => kv.Value == rel).Key;
-                            if (string.IsNullOrEmpty(sha1)) continue;
+                            var sha1 = (item["file"]?["hashes"] as JsonArray)?.OfType<JsonObject>()
+                                .FirstOrDefault(hash => hash["algo"]?.GetValue<int>() == 1)?["value"]?.GetValue<string>() ?? "";
+                            if (string.IsNullOrWhiteSpace(url) || !hashes.TryGetValue(sha1, out var rel)) continue;
                             if (!downloads.TryGetValue(sha1, out var list)) downloads[sha1] = list = new List<string>();
                             if (!list.Contains(url!)) list.Add(url!);
+                            var mirror = url!.Replace("edge.forgecdn.net", "mediafilez.forgecdn.net");
+                            if (!list.Contains(mirror)) list.Add(mirror);
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    try { var logDir = Path.Combine(AppPaths.SettingsDir, "logs"); Directory.CreateDirectory(logDir); File.AppendAllText(Path.Combine(logDir, "export.log"), DateTime.Now.ToString("HH:mm:ss") + " cf failed: " + ex.Message + Environment.NewLine); } catch { }
+                }
                 var files = new JsonArray();
                 foreach (var pair in downloads)
                 {
@@ -211,9 +315,12 @@ namespace AuroraLauncher
                     {
                         ["path"] = rel,
                         ["hashes"] = new JsonObject { ["sha1"] = pair.Key, ["sha512"] = sha512 },
-                        ["downloads"] = new JsonArray(pair.Value.OrderByDescending(u => u.Contains("modrinth.com")).Select(u => (JsonNode)u).ToArray()),
-                        ["fileSize"] = new FileInfo(file).Length,
-                        ["env"] = new JsonObject { ["client"] = "required", ["server"] = "required" }
+                        ["downloads"] = new JsonArray(pair.Value
+                            .SelectMany(url => new[] { url, url.Replace("edge.forgecdn.net", "mediafilez.forgecdn.net").Replace("mediafilez.forgecdn.net", "mediafilez.forgecdn.net") })
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(url => url.Contains("mediafilez.forgecdn.net") ? 0 : url.Contains("edge.forgecdn.net") ? 1 : 2)
+                            .Select(url => (JsonNode)url).ToArray()),
+                        ["fileSize"] = new FileInfo(file).Length
                     });
                     try { File.Delete(file); } catch { }
                 }

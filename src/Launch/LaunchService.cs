@@ -369,7 +369,7 @@ namespace AuroraLauncher
                     ["${version_type}"] = version["type"]?.GetValue<string>() ?? "release",
                     ["${natives_directory}"] = nativesDir,
                     ["${launcher_name}"] = "AuroraLauncher",
-                    ["${launcher_version}"] = "2.4.0",
+                    ["${launcher_version}"] = "2.4.1",
                     ["${classpath}"] = classpath,
                     ["${classpath_separator}"] = Path.PathSeparator.ToString(),
                     ["${library_directory}"] = Path.Combine(AppPaths.RootDir, "libraries"),
@@ -401,10 +401,24 @@ namespace AuroraLauncher
                 AddJvm("-Dfml.ignorePatchDiscrepancies", "-Dfml.ignorePatchDiscrepancies=true");
                 AddJvm("-Dlog4j2.formatMsgNoLookups", "-Dlog4j2.formatMsgNoLookups=true");
                 AddJvm("-Dminecraft.launcher.brand", "-Dminecraft.launcher.brand=AuroraLauncher");
-                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.4.0");
+                AddJvm("-Dminecraft.launcher.version", "-Dminecraft.launcher.version=2.4.1");
                 AddJvm("-Dos.name", "-Dos.name=Windows 10");
                 AddJvm("-Dos.version", "-Dos.version=10.0");
                 AddJvm("-XX:-OmitStackTraceInFastThrow", "-XX:-OmitStackTraceInFastThrow");
+                AddJvm("-Djava.net.useSystemProxies", "-Djava.net.useSystemProxies=true");
+                AddJvm("-Djava.net.preferIPv4Stack", "-Djava.net.preferIPv4Stack=true");
+                if (settings["proxyEnabled"]?.GetValue<bool>() == true)
+                {
+                    var proxyHost = settings["proxyHost"]?.GetValue<string>() ?? "";
+                    var proxyPort = settings["proxyPort"]?.GetValue<int>() ?? 0;
+                    if (!string.IsNullOrWhiteSpace(proxyHost) && proxyPort > 0)
+                    {
+                        AddJvm("-Dhttps.proxyHost", "-Dhttps.proxyHost=" + proxyHost);
+                        AddJvm("-Dhttps.proxyPort", "-Dhttps.proxyPort=" + proxyPort);
+                        AddJvm("-Dhttp.proxyHost", "-Dhttp.proxyHost=" + proxyHost);
+                        AddJvm("-Dhttp.proxyPort", "-Dhttp.proxyPort=" + proxyPort);
+                    }
+                }
                 foreach (var raw in jvmArgs)
                     args.Add(Replace(raw, replacements));
                 if (!args.Any(item => item.StartsWith("-Xmx", StringComparison.OrdinalIgnoreCase)))
@@ -449,7 +463,7 @@ namespace AuroraLauncher
                     }
                 }
                 args.Add("-Dminecraft.launcher.brand=AuroraLauncher");
-                args.Add("-Dminecraft.launcher.version=2.4.0");
+                args.Add("-Dminecraft.launcher.version=2.4.1");
                 var extraJvm = instance["jvmArgs"]?.GetValue<string>() ?? settings["jvmArgs"]?.GetValue<string>() ?? "";
                 args.AddRange(SplitArguments(extraJvm));
                 if (account["type"]?.GetValue<string>() == "authlib" && !string.IsNullOrWhiteSpace(account["authServer"]?.GetValue<string>()))
@@ -751,6 +765,16 @@ namespace AuroraLauncher
                 try
                 {
                     var analysis = LogService.Analyze(runId);
+                    try
+                    {
+                        if (analysis != null)
+                        {
+                            var cacheDir = Path.Combine(AppPaths.SettingsDir, "logs");
+                            Directory.CreateDirectory(cacheDir);
+                            File.WriteAllText(Path.Combine(cacheDir, "crash-" + runId + ".json"), analysis.ToJsonString());
+                        }
+                    }
+                    catch { }
                     var summary = analysis?["summary"]?.GetValue<string>() ?? "";
                     if (!string.IsNullOrWhiteSpace(summary))
                     {

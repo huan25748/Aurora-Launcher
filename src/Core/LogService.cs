@@ -111,6 +111,14 @@ namespace AuroraLauncher
             instanceId = Resolve(instanceId);
             var file = Path.Combine(LogsDir(instanceId), "latest.log");
             if (!File.Exists(file)) return null;
+            // 崩溃弹窗与「上次崩溃分析」必须展示同一份结果。
+            try
+            {
+                var cache = Path.Combine(AppPaths.SettingsDir, "logs", "crash-" + instanceId + ".json");
+                if (File.Exists(cache) && File.GetLastWriteTimeUtc(cache) >= File.GetLastWriteTimeUtc(file))
+                    return JsonNode.Parse(File.ReadAllText(cache)) as JsonObject;
+            }
+            catch { }
             var instance = BridgeService.GetInstance(instanceId) as JsonObject;
             if ((instance?["playCount"]?.GetValue<int>() ?? 0) <= 0 && instance?["lastPlayedAt"] == null) return null;
             try

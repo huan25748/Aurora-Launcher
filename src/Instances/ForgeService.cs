@@ -143,7 +143,7 @@ namespace AuroraLauncher
                 }
             }
             var result = new JsonArray(versions
-                .OrderByDescending(v => v, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(v => v, Comparer<string>.Create(CompareVersion))
                 .Select(v => (JsonNode)new JsonObject
                 {
                     ["version"] = v,
@@ -154,6 +154,23 @@ namespace AuroraLauncher
             if (result.Count > 0) ListCache[cacheKey] = result;
             else if (cachedList != null) return cachedList;
             return result;
+        }
+
+        private static int CompareVersion(string a, string b)
+        {
+            static int[] Numbers(string value) =>
+                System.Text.RegularExpressions.Regex.Matches(value, "\\d+")
+                    .Select(match => int.TryParse(match.Value, out var number) ? number : 0)
+                    .ToArray();
+            var left = Numbers(a);
+            var right = Numbers(b);
+            for (var i = 0; i < Math.Max(left.Length, right.Length); i++)
+            {
+                var x = i < left.Length ? left[i] : 0;
+                var y = i < right.Length ? right[i] : 0;
+                if (x != y) return x.CompareTo(y);
+            }
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
         public static async Task<JsonObject> Install(string kind, string mcVersion, string? loaderVersion, string? instanceName, bool createInstance, string? optifineVersion = null, CancellationToken token = default)
@@ -541,6 +558,14 @@ namespace AuroraLauncher
                 }
             }
 
+            if (tasks.Count == 0)
+            {
+                ProgressService.Step("预下载 Forge 依赖", 1, "没有需要预下载的依赖");
+                ProgressService.Progress(1, "没有需要预下载的依赖");
+                ProgressService.Complete();
+            }
+            else
+            {
             ProgressService.Step("预下载 Forge 依赖", tasks.Count, tasks.Count + " 个文件");
             var done = 0;
             long downloadedBytes = 0;
@@ -570,6 +595,7 @@ namespace AuroraLauncher
                         $"{current}/{tasks.Count} · {MinecraftInstallService.FormatBytes(System.Threading.Interlocked.Read(ref downloadedBytes))} · {Path.GetFileName(item.Path)}");
                 }
             }));
+            }
 
             // Old launcher also pre-downloaded the client mappings referenced by
             // MOJMAPS; otherwise the installer runs DOWNLOAD_MOJMAPS again.

@@ -18,7 +18,7 @@ namespace AuroraLauncher
         }
 
         private static readonly Dictionary<string, Flow> Flows = new();
-        private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        private static HttpClient Http => HttpFactory.Client;
 
         private static string ClientId()
         {

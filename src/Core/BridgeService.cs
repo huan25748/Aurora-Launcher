@@ -599,6 +599,8 @@ namespace AuroraLauncher
                     return SystemService.PickFolder();
                 case "instances:export":
                     return InstanceArchiveService.Export(ArgString(args, 0));
+                case "instances:export-dir":
+                    return new JsonObject { ["path"] = Path.Combine(AppPaths.SettingsDir, "packs") };
                 case "instances:export-pack":
                 {
                     if (args.ValueKind == JsonValueKind.Array && args.GetArrayLength() > 0 && args[0].ValueKind == JsonValueKind.Object)
